@@ -161,14 +161,16 @@ async function yinhuiContent(event, trigger, player) {
 }
 
 // 刷新获得的技能状态（参考官方势小乔 potyinhui.refreshSkill / 朱佩兰写法）：
-// 清除该技能的 storage 残留、发动次数统计、每轮计数、临时封禁与临时子技能，并重置限定技。
+// 清除该技能的发动次数统计、每轮计数、临时封禁与临时子技能，并重置限定技。
+// 注意：storage 只清精确键（技能自身 / _roundcount / temp_ban_），不做前缀匹配删除——
+// 否则会误删子技能的 storage（如 dcwumei_wake），导致残留子技能 filter 读 undefined 崩溃。
 function refreshSkill(player, skills) {
 	if (typeof skills === "string") skills = [skills];
-	Object.keys(player.storage)
-		.filter((i) => skills.some((skill) => i.startsWith(skill)))
-		.forEach((storage) => delete player.storage[storage]);
 	const suffixs = ["used", "round", "block", "blocker"];
 	for (const skill of skills) {
+		delete player.storage[skill];
+		delete player.storage[skill + "_roundcount"];
+		delete player.storage["temp_ban_" + skill];
 		const info = get.info(skill);
 		if (info.usable !== undefined) {
 			if (typeof player.getStat("triggerSkill")[skill] == "number" && player.getStat("triggerSkill")[skill] >= 1) {
@@ -177,12 +179,6 @@ function refreshSkill(player, skills) {
 			if (typeof player.getStat("skill")[skill] == "number" && player.getStat("skill")[skill] >= 1) {
 				delete player.getStat("skill")[skill];
 			}
-		}
-		if (info.round && player.storage[skill + "_roundcount"]) {
-			delete player.storage[skill + "_roundcount"];
-		}
-		if (player.storage[`temp_ban_${skill}`]) {
-			delete player.storage[`temp_ban_${skill}`];
 		}
 		if (player.awakenedSkills.includes(skill)) {
 			player.restoreSkill(skill);
