@@ -214,12 +214,39 @@ async function heyunContent(event, trigger, player) {
 	}
 }
 
+// ========== 神马超与美化扩展兼容 ==========
+// 十周年UI 动皮、千幻聆音语音共享等扩展均按武将id查表；把新神马超注册为
+// 原版神马超的别名，使美化原版神马超的扩展同样作用于本武将。
+function setupShenMachaoCompat() {
+	// 十周年UI 动皮表（decadeUI.dynamicSkin）：共享原版神马超的动皮
+	if (window.decadeUI?.dynamicSkin) {
+		const source =
+			window.decadeUI.dynamicSkin.shen_machao || window.decadeUI.dynamicSkin.mb_shen_machao;
+		if (source && !window.decadeUI.dynamicSkin["suixiang-mb_shen_machao"]) {
+			window.decadeUI.dynamicSkin["suixiang-mb_shen_machao"] = source;
+		}
+	}
+	// 千幻聆音语音共享表：新技能语音映射到原版同名技能
+	if (lib.qhly_skinShare) {
+		lib.qhly_skinShare["suixiang-mb_shen_machao"] = {
+			name: "mb_shen_machao",
+			skills: {
+				suixiang_mb_yuli: "yuli",
+			},
+		};
+	}
+}
+
 export const type = "extension";
 
 export default function () {
 	return {
 		name: "随想录",
-		content(config, pack) {},
+		content(config, pack) {
+			// 立即尝试（美化扩展已加载时生效），并在游戏就绪后兜底（美化扩展后加载时生效）
+			setupShenMachaoCompat();
+			lib.arenaReady.push(setupShenMachaoCompat);
+		},
 		package: {
 			character: {
 				character: {
@@ -233,16 +260,146 @@ export default function () {
 						img: "extension/随想录/image/character/suixiang-shi_xiaoqiao.jpg",
 						dieAudios: ["ext:随想录/audio/die/suixiang-shi_xiaoqiao.mp3"],
 					},
+					// 神马超：在原版手杀神马超 mb_shen_machao 基础上再开发。
+					// 性别/势力/体力与原版一致；立绘、阵亡语音为复制进扩展包的原版资源。
+					"suixiang-mb_shen_machao": {
+						sex: "male",
+						group: "shen",
+						hp: 4,
+						skills: ["suixiang_mb_yuli"],
+						names: "马|超",
+						img: "extension/随想录/image/character/suixiang-mb_shen_machao.jpg",
+						dieAudios: ["ext:随想录/audio/die/suixiang-mb_shen_machao.mp3"],
+					},
 				},
 				translate: {
 					"suixiang-shi_xiaoqiao": "势 小乔",
+					"suixiang-mb_shen_machao": "神 马超",
 				},
 				characterTitle: {
 					"suixiang-shi_xiaoqiao": "衷音慰湟",
+					"suixiang-mb_shen_machao": "势震九天",
 				},
 			},
 			skill: {
 				skill: {
+					// ========== 驭雳（基于原版 yuli 改动：新增相邻角色溅射扩散） ==========
+					suixiang_mb_yuli: {
+						audio: "ext:随想录/audio/skill:6",
+						trigger: {
+							source: ["damageBegin1", "damageEnd"],
+							player: "damageBegin4",
+						},
+						filter(event, player, name) {
+							if (name === "damageBegin1") {
+								// 溅射伤害不再吃"改为雷电/雷伤+1"
+								return !event.suixiang_mb_yuli_splash;
+							}
+							if (name === "damageEnd") {
+								// 伤害结算完成后扩散：按改雷+1后的伤害值>1，且伤害未被防止
+								return event.suixiang_mb_yuli_splash > 1 && !event._cancelled;
+							}
+							// damageBegin4：受到雷电伤害时免疫并摸牌
+							return event.hasNature("thunder");
+						},
+						forced: true,
+						locked: true,
+						logAudio(event) {
+							if (typeof event === "number") {
+								return `ext:随想录/audio/skill/suixiang_mb_yuli${event}.mp3`;
+							}
+							// 与原版一致：常规触发随机播第1/2条
+							return [
+								"ext:随想录/audio/skill/suixiang_mb_yuli1.mp3",
+								"ext:随想录/audio/skill/suixiang_mb_yuli2.mp3",
+							];
+						},
+						async content(event, trigger, player) {
+							switch (event.triggername) {
+								case "damageBegin1": {
+									if (!trigger.hasNature("thunder")) {
+										player.logSkill("suixiang_mb_yuli");
+										game.setNature(trigger, "thunder");
+									} else {
+										player.logSkill("suixiang_mb_yuli", null, null, null, [get.rand(3, 4)]);
+										trigger.num++;
+									}
+									// 记录扩散基数（改为雷电/加值后的最终伤害值），待伤害结算完成后扩散
+									if (trigger.num > 1) trigger.suixiang_mb_yuli_splash = trigger.num;
+									updateState(player, "atk");
+									break;
+								}
+								case "damageEnd": {
+									// 扩散：对受伤害者相邻的存活角色各造成一半（向下取整）雷电伤害。
+									// 扩散伤害不再受"雷伤+1"，但若仍高于1点会继续向外扩散；
+									// 扩散伤害同样吃驭雳的免伤摸牌（打到自己时免疫并摸牌）。
+									const splashNum = Math.floor(trigger.suixiang_mb_yuli_splash / 2);
+									const victim = trigger.player;
+									const targets = [victim.getNext(), victim.getPrevious()].filter((t) => t && !t.isDead());
+									const unique = [];
+									for (const t of targets) {
+										if (!unique.includes(t)) unique.push(t);
+									}
+									player.logSkill("suixiang_mb_yuli", null, null, null, [get.rand(3, 4)]);
+									for (const t of unique) {
+										await t
+											.damage({
+												source: player,
+												num: splashNum,
+												nature: "thunder",
+											})
+											.set("suixiang_mb_yuli_splash", splashNum);
+									}
+									break;
+								}
+								case "damageBegin4": {
+									player.logSkill("suixiang_mb_yuli", null, null, null, [get.rand(5, 6)]);
+									trigger.cancel();
+									await player.draw(trigger.num);
+									updateState(player, "def");
+									break;
+								}
+							}
+							return;
+
+							/**
+							 * 记录驭雳两项的执行状态（结构沿用原版，供后续寂灭刷新机制使用）
+							 */
+							function updateState(player, type) {
+								// 寂灭尚未加入本武将，暂不生效；待 suixiang_mb_jimie 实装后启用
+								if (!player.awakenedSkills.includes("suixiang_mb_jimie")) return;
+								switch (type) {
+									case "atk":
+										player.markAuto("suixiang_mb_yuli", ["atk"]);
+										break;
+									case "def":
+										player.markAuto("suixiang_mb_yuli", ["def"]);
+										break;
+								}
+							}
+						},
+						onremove: true,
+						intro: {
+							content(storage = [], player) {
+								if (!storage?.length) return "尚未触发【驭雳】的任一项";
+								let str = "已触发【驭雳】的";
+								if (storage.includes("atk")) {
+									str += "第一项";
+									if (storage.includes("def")) str += "和";
+								}
+								if (storage.includes("def")) str += "第二项";
+								return str;
+							},
+						},
+						ai: {
+							nothunder: true,
+							effect: {
+								target(card, player, target, current) {
+									if (get.tag(card, "thunderDamage")) return "zeroplayertarget";
+								},
+							},
+						},
+					},
 					suixiang_heyun: {
 						audio: "ext:随想录/audio/skill:2",
 						enable: "phaseUse",
@@ -340,6 +497,9 @@ export default function () {
 					},
 				},
 				translate: {
+					suixiang_mb_yuli: "驭雳",
+					suixiang_mb_yuli_info:
+						"锁定技。造成的伤害改为雷电伤害，若原版伤害已经是雷电伤害则伤害增加1点。当造成高于1点的雷电伤害时会额外对目标相邻的角色造成一半伤害（向下取整）。受到雷电伤害时免疫雷电伤害并摸等量牌。",
 					suixiang_heyun: "和韵",
 					suixiang_heyun_info:
 						"出牌阶段限两次，你可以选择自己或一名与你拥有相同技能的角色，令其失去一个你选择的武将牌上技能（装备技能除外），然后其摸两张牌。每回合你首次进入濒死时，你可以对自己发动此技能，失去一个你选择的武将牌上技能（装备技能除外），摸两张牌，然后回复至1点体力。",
@@ -347,6 +507,14 @@ export default function () {
 					suixiang_yinhui_info:
 						"每轮开始时，或当你失去技能时，你可以选择一名其他角色，获得其武将牌上当前拥有的一个技能（装备技能除外）。",
 					suixiang_yinhui_lose: "音洄",
+					// 驭雳台词（原版手杀神马超，键按扩展音频路径生成）
+					"#ext:随想录/audio/skill/suixiang_mb_yuli1": "驭元始之用，执生杀之机！",
+					"#ext:随想录/audio/skill/suixiang_mb_yuli2": "号令雷霆，上照天心！",
+					"#ext:随想录/audio/skill/suixiang_mb_yuli3": "抗我神威者，俱为齑粉！",
+					"#ext:随想录/audio/skill/suixiang_mb_yuli4": "万钧所压，再无生还！",
+					"#ext:随想录/audio/skill/suixiang_mb_yuli5": "惊霆九殛，锻我神魂！",
+					"#ext:随想录/audio/skill/suixiang_mb_yuli6": "玄雷淬锋，砺我神威！",
+					"#ext:随想录/audio/die/suixiang-mb_shen_machao:die": "我裁万世，何以裁我……",
 				},
 			},
 			intro: "随想录扩展：所有武将/技能均以 suixiang 为前缀。",
