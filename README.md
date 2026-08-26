@@ -1,4 +1,4 @@
-# 随想录 · 无名杀扩展
+﻿# 随想录 · 无名杀扩展
 
 ![Version](https://img.shields.io/badge/version-1.3.0-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
@@ -78,4 +78,4 @@
 
 ## License
 
-[MIT](./LICENSE) © 2026 无名玩家
+[MIT](./LICENSE) © 2026 伽拉忒亚

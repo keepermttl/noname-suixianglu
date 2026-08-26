@@ -780,9 +780,9 @@ export default function () {
 					"#ext:随想录/audio/die/suixiang-mb_shen_machao:die": "我裁万世，何以裁我……",
 				},
 			},
-			intro: "随想录扩展：所有武将/技能均以 suixiang 为前缀。",
-			author: "无名玩家",
-			version: "1.0",
+			intro: "随想录扩展：所有武将/技能均以 suixiang 为前缀。下载地址：https://github.com/keepermttl/noname-suixianglu",
+			author: "伽拉忒亚",
+			version: "1.3.0",
 		},
 		files: {
 			character: [],
