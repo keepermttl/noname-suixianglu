@@ -304,33 +304,40 @@ async function quanyuUseCardContent(event, trigger, player) {
 		trigger.baseDamage = (trigger.baseDamage || 0) + pool.baihong;
 		game.log(trigger.card, "的基础伤害+", pool.baihong);
 	}
-	// 青冥：每层额外指定一个目标
+	// 青冥：每层+1个额外目标上限；逐层询问、每层限选1个，点取消即停止（可选0~N个，不会被自动全选）
 	if (pool.qingming) {
 		let left = pool.qingming;
 		while (left > 0) {
-			const targets = game.filterPlayer(target => {
+			const candidates = game.filterPlayer(target => {
 				if (trigger.targets.includes(target)) return false;
 				return lib.filter.targetEnabled2(trigger.card, player, target) && lib.filter.targetInRange(trigger.card, player, target);
 			});
-			if (!targets.length) break;
-			const result =
-				targets.length > 1
-					? await player
-							.chooseTarget({
-								prompt: `权御：为${get.translation(trigger.card)}额外指定一个目标`,
-								filterTarget(card, player, target) {
-									const trigger2 = get.event().triggerx;
-									if (trigger2.targets?.includes(target)) return false;
-									return lib.filter.targetEnabled2(trigger2.card, player, target) && lib.filter.targetInRange(trigger2.card, player, target);
-								},
-								ai(target) {
-									const { player, triggerx } = get.event();
-									return get.effect(target, triggerx.card, player, player);
-								},
-							})
-							.set("triggerx", trigger)
-							.forResult()
-					: { bool: true, targets };
+			if (!candidates.length) break;
+			const result = await player
+				.chooseTarget({
+					prompt: `权御：为${get.translation(trigger.card)}额外选择一个目标（还可选择${left}个，点击取消停止）`,
+					selectTarget: 1,
+					filterTarget(card, player, target) {
+						const trigger2 = get.event().triggerx;
+						if (trigger2.targets?.includes(target)) return false;
+						return lib.filter.targetEnabled2(trigger2.card, player, target) && lib.filter.targetInRange(trigger2.card, player, target);
+					},
+					ai(target) {
+						const { player, triggerx } = get.event();
+						return get.effect(target, triggerx.card, player, player);
+					},
+					processAI() {
+						const event = get.event();
+						const { player, triggerx: trigger2 } = event;
+						const list = game.filterPlayer(target => event.filterTarget(null, player, target));
+						const good = list.filter(target => get.effect(target, trigger2.card, player, player) < 0);
+						if (!good.length) return { bool: false };
+						return { bool: true, targets: good.slice(0, 1) };
+					},
+				})
+				.set("triggerx", trigger)
+				.set("noAutoSelect", true)
+				.forResult();
 			if (result?.bool && result.targets?.length) {
 				const targets2 = result.targets.sortBySeat();
 				player.line(targets2);
@@ -408,6 +415,55 @@ async function tianenContent(event, trigger, player) {
 	}
 }
 
+// ========== 乾纲 ==========
+// 该角色的“权御”标记总数（六项层数之和，用于乾纲各档效果判定）。
+function getQuanyuMarkCount(player) {
+	return QUANYU_EFFECTS.reduce((sum, effect) => sum + player.countMark(`suixiang_olquanyu_${effect}`), 0);
+}
+
+// 乾纲入魔特效与官方语音（资源已复制进扩展；无名美化缺失时静默跳过）。
+function playQianGangFx() {
+	try {
+		game.playAudio("..", "extension", "随想录/audio/skin/suixiang-dm_sunquan/官方乾纲语音/Skill_MoSunQuan_3795_1.mp3");
+	} catch (e) {}
+	if (window.skinSwitch?.chukuangWorkerApi?.playEffect) {
+		try {
+			window.skinSwitch.chukuangWorkerApi.playEffect(
+				{
+					name: "../../../无名美化/animation/mosunquan/FX_MatchGame_mosunquan",
+					version: "4.0",
+					action: "play",
+					json: true,
+				},
+				{
+					speed: 1,
+					scale: 1,
+					x: [0, 0.5],
+					y: [0, 0.5],
+				}
+			);
+		} catch (e) {}
+	}
+}
+
+// 乾纲内容：失去天恩并入魔，其他角色获得“乾纲”debuff状态技（永久）。
+async function qiangangContent(event, trigger, player) {
+	if (event.triggername === "damageEnd") {
+		// 2枚：其他角色受到伤害后，魔孙权摸一张牌
+		await player.draw();
+		return;
+	}
+	player.addSkill("suixiang_olrumo");
+	await player.removeSkills("suixiang_oltianen");
+	for (const target of game.filterPlayer(target => target !== player)) {
+		if (!target.hasSkill("suixiang_olqiangang_effect")) {
+			target.addSkill("suixiang_olqiangang_effect");
+			target.markSkill("suixiang_olqiangang_effect");
+		}
+	}
+	playQianGangFx();
+}
+
 // ========== 神马超与美化扩展兼容 ==========
 // 十周年UI 动皮、千幻聆音语音共享等扩展均按武将id查表；把新神马超注册为
 // 原版神马超的别名，使美化原版神马超的扩展同样作用于本武将。
@@ -467,8 +523,7 @@ function setupSunquanCompat() {
 			window.decadeUI.dynamicSkin["suixiang-dm_sunquan"] = source;
 		}
 	}
-	// 千幻聆音皮肤/语音共享表：新技能语音映射到原版同名技能
-	// （权御/天恩/乾纲技能暂未创建，映射先行备好，创建技能后自动生效）
+	// 千幻聆音皮肤/语音共享表：新技能语音映射到原版同名技能（权御/天恩/乾纲均已实装）
 	if (lib.qhly_skinShare) {
 		lib.qhly_skinShare["suixiang-dm_sunquan"] = {
 			name: "dm_sunquan",
@@ -518,14 +573,14 @@ export default function () {
 						dieAudios: ["ext:随想录/audio/die/suixiang-mb_shen_machao.mp3"],
 					},
 					// 魔孙权：在原版 OL 魔孙权 dm_sunquan 基础上再开发。
-					// 性别/势力/体力与原版一致（male/wu/4）；立绘、阵亡语音为复制进扩展包的原版资源。
-					// 技能：权御/天恩已实装（重构版，语音/选单/标记与原版一致）；乾纲/入魔待开发。
+					// 势力与OL魔孙权一致为"魔"（devil）；立绘、阵亡语音为复制进扩展包的原版资源。
+					// 技能：权御/天恩/乾纲/入魔全部实装（重构版，语音/选单/标记与原版一致）。
 					// 技能语音已按技能id备于 audio/skill/suixiang_olquanyu* 等。
 					"suixiang-dm_sunquan": {
 						sex: "male",
-						group: "wu",
+						group: "devil",
 						hp: 4,
-						skills: ["suixiang_olquanyu", "suixiang_oltianen"],
+						skills: ["suixiang_olquanyu", "suixiang_oltianen", "suixiang_olqiangang"],
 						names: "孙|权",
 						img: "extension/随想录/image/character/suixiang-dm_sunquan.jpg",
 						dieAudios: ["ext:随想录/audio/die/suixiang-dm_sunquan.mp3"],
@@ -997,6 +1052,129 @@ export default function () {
 							},
 						},
 					},
+					// ========== 乾纲（原版 olqiangang 重构：入魔+按权御标记数给其他角色叠debuff） ==========
+					suixiang_olqiangang: {
+						audio: "ext:随想录/audio/skill:3",
+						enable: "phaseUse",
+						filter(event, player, name) {
+							if (name === "damageEnd") {
+								// 2枚：其他角色受到伤害后，魔孙权摸一张牌（仅入魔后、仅其他角色、伤害未被防止）
+								if (event._cancelled || !event.num) return false;
+								if (!player.hasSkill("suixiang_olrumo", null, false, false)) return false;
+								if (event.player === player) return false;
+								return getQuanyuMarkCount(event.player) >= 2;
+							}
+							return !player.hasSkill("suixiang_olrumo", null, false, false) && player.hasSkill("suixiang_oltianen", null, false, false);
+						},
+						trigger: { global: "damageEnd" },
+						direct: true,
+						skillAnimation: true,
+						animationColor: "wood",
+						manualConfirm: true,
+						content: qiangangContent,
+						global: "suixiang_olqiangang_save",
+						derivation: "suixiang_olrumo",
+						ai: {
+							order: 8,
+							result: {
+								player(player) {
+									// 敌方权御标记越多越值得入魔
+									const marks = game.filterPlayer(target => get.attitude(player, target) < 0).reduce((sum, target) => sum + getQuanyuMarkCount(target), 0);
+									return marks >= 6 ? 1 : 0;
+								},
+							},
+						},
+					},
+					// 乾纲debuff状态技：挂在其他角色身上，按其“权御”标记总数动态生效
+					suixiang_olqiangang_effect: {
+						charlotte: true,
+						forced: true,
+						silent: true,
+						init(player, skill) {
+							player.addSkillBlocker(skill);
+						},
+						onremove(player, skill) {
+							player.removeSkillBlocker(skill);
+						},
+						skillBlocker(skill, player) {
+							// 6枚：回合外非锁定技失效（缠怨同款）
+							if (_status.currentPhase === player) return false;
+							if (getQuanyuMarkCount(player) < 6) return false;
+							const info = lib.skill[skill];
+							return !(info.locked || info.charlotte || info.persevereSkill);
+						},
+						mod: {
+							attackRange(card, player, range) {
+								// 8枚：攻击距离始终为0
+								if (getQuanyuMarkCount(player) >= 8) return 0;
+							},
+							cardUsable(card, player, num) {
+								// 8枚：出杀次数始终为0
+								if (getQuanyuMarkCount(player) >= 8 && card.name === "sha") return 0;
+							},
+							maxHandcard(card, player, num) {
+								// 8枚：手牌上限始终为0
+								if (getQuanyuMarkCount(player) >= 8) return 0;
+							},
+						},
+						mark: true,
+						marktext: "纲",
+						intro: {
+							name: "乾纲",
+							content(storage, player) {
+								const n = getQuanyuMarkCount(player);
+								let str = `当前拥有${n}枚“权御”标记。`;
+								const tiers = [
+									[2, "你受到伤害后，魔孙权摸一张牌"],
+									[4, "你进入濒死时，只能使用【酒】回复体力"],
+									[6, "回合外你的非锁定技失效"],
+									[8, "你的攻击距离、出杀次数与手牌上限始终为0"],
+								];
+								const active = tiers.filter(([t]) => n >= t);
+								if (active.length) {
+									str += "<br>已生效：" + active.map(([, text]) => `<li>${text}`).join("");
+								} else {
+									str += "<br>暂未生效（需2枚“权御”标记）";
+								}
+								return str;
+							},
+						},
+					},
+					// 乾纲全局技能：4枚角色濒死时禁止一切体力恢复（豁免【酒】）
+					suixiang_olqiangang_save: {
+						trigger: { global: "recoverBegin" },
+						filter(event, player) {
+							const target = event.player;
+							if (!target?.isDying()) return false;
+							if (!target.hasSkill("suixiang_olqiangang_effect") || getQuanyuMarkCount(target) < 4) return false;
+							// 豁免【酒】
+							if (event.card && get.name(event.card) === "jiu") return false;
+							return true;
+						},
+						forced: true,
+						popup: false,
+						async content(event, trigger, player) {
+							trigger.cancel();
+							game.log(trigger.player, "的体力恢复被", "#g【乾纲】", "禁止");
+						},
+					},
+					// 入魔：原版 olrumo 状态技
+					suixiang_olrumo: {
+						charlotte: true,
+						trigger: { global: "roundEnd" },
+						filter(event, player) {
+							return !player.getRoundHistory("sourceDamage", evt => evt.num > 0).length;
+						},
+						forced: true,
+						popup: false,
+						content() {
+							player.loseHp();
+						},
+						nopop: true,
+						mark: true,
+						marktext: "魔",
+						intro: { content: "你已入魔" },
+					},
 					suixiang_heyun: {
 						audio: "ext:随想录/audio/skill:2",
 						enable: "phaseUse",
@@ -1105,7 +1283,7 @@ export default function () {
 						"限定技，出牌阶段结束时，你可以弃8个“霆”标记，对一名角色造成等于其体力上限的伤害。然后当你【驭雳】的两项均执行后，此技能视为未发动过。",
 					suixiang_olquanyu: "权御",
 					suixiang_olquanyu_info:
-						"锁定技。每轮开始时，所有角色同时为你选择两项“权御”效果（两项不可相同；辟邪、紫电与流星本局每人限选一次），然后你摸X张牌（X为其中与你本轮选择相同的角色数，不设上限）。你使用伤害牌指定目标后，执行全部“权御”效果：白虹：基础伤害+1；青冥：额外指定一个目标；辟邪：无视防具；紫电：不可响应；百里：额外结算一次；流星：无次数限制。所有角色的选择永久累计并强化你。",
+						"锁定技。每轮开始时，所有角色同时为你选择两项“权御”效果（两项不可相同；辟邪、紫电与流星本局每人限选一次），然后你摸X张牌（X为其中与你本轮选择相同的角色数，不设上限）。你使用伤害牌指定目标后，执行全部“权御”效果：白虹：基础伤害+1；青冥：每层可额外选择一个目标（自由选择数量，可随时停止）；辟邪：无视防具；紫电：不可响应；百里：额外结算一次；流星：无次数限制。所有角色的选择永久累计并强化你。",
 					suixiang_olquanyu_baihong: "白虹",
 					suixiang_olquanyu_qingming: "青冥",
 					suixiang_olquanyu_bixie: "辟邪",
@@ -1123,6 +1301,16 @@ export default function () {
 					suixiang_oltianen_info:
 						"锁定技。你使用牌指定一名角色为目标后：若你与其本轮的“权御”选择存在相同效果，你从牌堆获得一张不计入手牌上限的【杀】；若完全不同，你随机弃置其一张牌，然后对其发动一次“权御”。",
 					suixiang_oltianen_effect: "不计上限",
+					// 乾纲台词（原版魔孙权，键按扩展音频路径生成）
+					"#ext:随想录/audio/skill/suixiang_olqiangang1": "清浊之分，朕说无用便是无用。",
+					"#ext:随想录/audio/skill/suixiang_olqiangang2": "这天下欠朕的，该还了。",
+					"#ext:随想录/audio/skill/suixiang_olqiangang3": "朕心即天意，卿当跪听天怒！",
+					suixiang_olqiangang: "乾纲",
+					suixiang_olqiangang_info:
+						"出牌阶段，你可失去〖天恩〗并入魔，然后其他角色根据其拥有的“权御”标记数获得效果：2枚，其受到伤害后，你摸一张牌；4枚，其进入濒死时，只能使用【酒】回复体力；6枚，回合外其非锁定技失效；8枚，其攻击距离、出杀次数与手牌上限始终为0。",
+					suixiang_olqiangang_effect: "乾纲",
+					suixiang_olrumo: "入魔",
+					suixiang_olrumo_info: "每局游戏限一次。入魔后，每轮结束时，若本轮你未造成过伤害，你失去1点体力。",
 					suixiang_heyun: "和韵",
 					suixiang_heyun_info:
 						"出牌阶段限两次，你可以选择自己或一名与你拥有相同技能的角色，令其失去一个你选择的武将牌上技能（装备技能除外），然后其摸两张牌。每回合你首次进入濒死时，你可以对自己发动此技能，失去一个你选择的武将牌上技能（装备技能除外），摸两张牌，然后回复至1点体力。",
@@ -1151,7 +1339,7 @@ export default function () {
 			},
 			intro: "随想录扩展：所有武将/技能均以 suixiang 为前缀。下载地址：https://github.com/keepermttl/noname-suixianglu",
 			author: "伽拉忒亚",
-			version: "1.3.5",
+			version: "1.3.9",
 		},
 		files: {
 			character: [],
