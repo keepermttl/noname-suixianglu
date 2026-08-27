@@ -377,17 +377,18 @@ async function quanyuUseCardContent(event, trigger, player) {
 }
 
 // ========== 天恩 ==========
-// 使用牌指定一名角色为目标后：与该目标的本轮“权御”选择存在交集→得一张不计上限【杀】；
-// 完全不同→随机弃其一张牌，再对其发动一次“权御”。无每回合次数限制、无唯一目标限制
-// （多目标牌按目标逐个触发）。
+// 使用牌指定一名角色为目标后，比较其与你的本轮“权御”选择：
+// 存在相同效果（≥1项）→得一张不计上限【杀】；
+// 存在不同效果（仅1项相同或完全不同）→随机弃其一张牌，再对其发动一次“权御”。
+// 无每回合次数限制、无唯一目标限制（多目标牌按目标逐个触发）。
 async function tianenContent(event, trigger, player) {
 	const target = trigger.target;
 	const round = player.getStorage("suixiang_olquanyu_round", {}) || {};
 	const playerChoices = round[player.playerid] || [];
 	const targetChoices = round[target.playerid] || [];
-	const same = targetChoices.some(link => playerChoices.includes(link));
-	if (same) {
-		// 相同：从牌堆获得一张不计入手牌上限的【杀】
+	const sameNum = targetChoices.filter(link => playerChoices.includes(link)).length;
+	if (sameNum >= 1) {
+		// 存在相同：从牌堆获得一张不计入手牌上限的【杀】
 		const card = get.cardPile("sha");
 		if (card) {
 			player.addSkill("suixiang_oltianen_effect");
@@ -395,8 +396,9 @@ async function tianenContent(event, trigger, player) {
 			next.gaintag.add("suixiang_oltianen_effect");
 			await next;
 		}
-	} else {
-		// 不同：随机弃置其一张牌，然后对其发动一次“权御”
+	}
+	if (sameNum < 2) {
+		// 存在不同：随机弃置其一张牌，然后对其发动一次“权御”
 		const cards = target.getDiscardableCards(player, "he");
 		if (cards.length) {
 			const next = target.discard(cards.randomGet());
@@ -1299,7 +1301,7 @@ export default function () {
 					"#ext:随想录/audio/skill/suixiang_oltianen3": "庙堂之上，贤良忠臣独汝一人？",
 					suixiang_oltianen: "天恩",
 					suixiang_oltianen_info:
-						"锁定技。你使用牌指定一名角色为目标后：若你与其本轮的“权御”选择存在相同效果，你从牌堆获得一张不计入手牌上限的【杀】；若完全不同，你随机弃置其一张牌，然后对其发动一次“权御”。",
+						"锁定技。你使用牌指定一名角色为目标后：若你与其本轮的“权御”选择存在相同效果，你从牌堆获得一张不计入手牌上限的【杀】；若存在不同效果，你随机弃置其一张牌，然后对其发动一次“权御”。（仅一项相同时，两项效果均触发。）",
 					suixiang_oltianen_effect: "不计上限",
 					// 乾纲台词（原版魔孙权，键按扩展音频路径生成）
 					"#ext:随想录/audio/skill/suixiang_olqiangang1": "清浊之分，朕说无用便是无用。",
@@ -1339,7 +1341,7 @@ export default function () {
 			},
 			intro: "随想录扩展：所有武将/技能均以 suixiang 为前缀。下载地址：https://github.com/keepermttl/noname-suixianglu",
 			author: "伽拉忒亚",
-			version: "1.3.9",
+			version: "1.3.10",
 		},
 		files: {
 			character: [],
