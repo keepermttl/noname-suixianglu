@@ -89,8 +89,9 @@ function getCuifengDuelContext(event, player) {
 	if (!use || use.player !== player || !Array.isArray(use.targets)) return null;
 	const snapshot = use.suixiang_cuifeng_snapshot;
 	if (!snapshot || !Array.isArray(snapshot.unlocks)) return null;
-	if (!use.targets.includes(event.player)) return null;
-	return { use, snapshot };
+	const targetDamage = use.targets.includes(event.player);
+	if (!targetDamage && event.player !== use.player) return null;
+	return { use, snapshot, targetDamage };
 }
 function applyWuyiBlock(player, force = false) {
 	if (getWuyiLevel(player) < 3 || (!force && _status.currentPhase !== player)) return;
@@ -1694,7 +1695,11 @@ export default function () {
 						persevereSkill: true,
 						trigger: { global: "phaseBegin" },
 						filter(event, player) {
-							return player.isIn() && game.hasPlayer((current) => current !== player && current.isIn());
+							return (
+								(player.getStorage("suixiang_cuifeng_roundcount") || 0) < 2 &&
+								player.isIn() &&
+								game.hasPlayer((current) => current !== player && current.isIn())
+							);
 						},
 						async cost(event, trigger, player) {
 							event.result = await player
@@ -1713,6 +1718,7 @@ export default function () {
 						async content(event, trigger, player) {
 							const target = event.targets?.[0];
 							if (!target || !target.isIn()) return;
+							player.storage.suixiang_cuifeng_roundcount = (player.getStorage("suixiang_cuifeng_roundcount") || 0) + 1;
 							const names = getWuyiNames(player).slice();
 							const unlocks = refreshCuifengUnlocks(player).slice();
 							const snapshot = { names, unlocks };
@@ -1731,7 +1737,7 @@ export default function () {
 							};
 							await next;
 						},
-						group: ["suixiang_cuifeng_damage"],
+						group: ["suixiang_cuifeng_damage", "suixiang_cuifeng_round"],
 						ai: {
 							order: 1,
 							result: {
@@ -1741,6 +1747,17 @@ export default function () {
 							},
 						},
 						subSkill: {
+							round: {
+								charlotte: true,
+								persevereSkill: true,
+								trigger: { global: "roundStart" },
+								forced: true,
+								silent: true,
+								popup: false,
+								content(event, trigger, player) {
+									delete player.storage.suixiang_cuifeng_roundcount;
+								},
+							},
 							damage: {
 								charlotte: true,
 								persevereSkill: true,
@@ -1755,7 +1772,7 @@ export default function () {
 									const context = getCuifengDuelContext(event, player);
 									if (!context) return false;
 									const { unlocks } = context.snapshot;
-									if (unlocks.includes("jiu") || unlocks.includes("tao")) return true;
+									if (context.targetDamage && (unlocks.includes("jiu") || unlocks.includes("tao"))) return true;
 									if (unlocks.includes("unrecorded")) {
 										return getBasicCardNames().some((name) => !getWuyiNames(player).includes(name));
 									}
@@ -1773,8 +1790,10 @@ export default function () {
 											if (recordWuyiName(player, name)) await applyWuyiProgress(player);
 										}
 									}
-									if (unlocks.includes("jiu")) addCuifengJiu(trigger.player);
-									if (unlocks.includes("tao")) addCuifengTao(trigger.player);
+									if (context.targetDamage) {
+										if (unlocks.includes("jiu")) addCuifengJiu(trigger.player);
+										if (unlocks.includes("tao")) addCuifengTao(trigger.player);
+									}
 								},
 							},
 							jiu: {
@@ -1953,7 +1972,7 @@ export default function () {
 						"你可以将一至两张牌按下列规则使用或打出：红桃当【桃】，方块当火【杀】，梅花当【闪】，黑桃当【无懈可击】。若你以此法使用的牌为两张：使用的【桃】令目标角色加1点体力上限，使用的火【杀】额外结算两次，使用的【闪】令此【杀】的使用者随机弃置两张牌，使用的【无懈可击】不能被响应且你获得被响应的牌。",
 					suixiang_cuifeng: "摧锋",
 					suixiang_cuifeng_info:
-						"持恒技。每个回合开始时，你可以对一名其他角色使用【决斗】。你拥有〖武翊〗时解锁“未记录”效果；〖武翊〗记录【杀】、【闪】、【酒】、【桃】后分别解锁对应效果。已解锁的效果永久生效：未记录，造成伤害后随机记录一个未记录的基本牌名；【杀】，此【决斗】造成的伤害+X（X为〖武翊〗记录的牌名数）；【闪】，此【决斗】不可响应；【酒】，其受到此【决斗】伤害后，其下一张使用或打出的牌无效；【桃】，其受到此【决斗】伤害后，直到其下一个回合结束阶段开始时不能回复体力。",
+						"持恒技。每轮限两次。每个回合开始时，你可以对一名其他角色使用【决斗】。你拥有〖武翊〗时解锁“未记录”效果；〖武翊〗记录【杀】、【闪】、【酒】、【桃】后分别解锁对应效果。已解锁的效果永久生效：未记录，造成伤害后随机记录一个未记录的基本牌名；【杀】，此【决斗】造成的伤害+X（X为〖武翊〗记录的牌名数）；【闪】，此【决斗】不可响应；【酒】，其受到此【决斗】伤害后，其下一张使用或打出的牌无效；【桃】，其受到此【决斗】伤害后，直到其下一个回合结束阶段开始时不能回复体力。",
 					suixiang_cuifeng_jiu: "摧锋·酒",
 					suixiang_cuifeng_tao: "摧锋·桃",
 					suixiang_wuyi_block: "武翊",
@@ -2024,7 +2043,7 @@ export default function () {
 			},
 			intro: "随想录扩展：所有武将/技能均以 suixiang 为前缀。下载地址：https://github.com/keepermttl/noname-suixianglu",
 			author: "伽拉忒亚",
-			version: "1.3.12",
+			version: "1.3.13",
 		},
 		files: {
 			character: [],
