@@ -21,6 +21,47 @@ function setHeyunDyingFlag(player, value) {
 	}, player, value);
 }
 
+// ========== 武翊（势赵云） ===========
+function getWuyiNames(player) {
+	const names = player.getStorage("suixiang_wuyi");
+	return Array.isArray(names) ? names : [];
+}
+function getWuyiLevel(player) {
+	return getWuyiNames(player).length;
+}
+function applyWuyiBlock(player, force = false) {
+	if (getWuyiLevel(player) < 3 || (!force && _status.currentPhase !== player)) return;
+	for (const target of game.filterPlayer((current) => current !== player)) {
+		target.addTempSkill("suixiang_wuyi_block", { global: "phaseAfter" });
+	}
+}
+async function adjustWuyiHand(player) {
+	if (getWuyiLevel(player) < 4 || player._suixiang_wuyi_adjusting) return;
+	const handCount = player.countCards("h");
+	if (handCount === 4) return;
+	player._suixiang_wuyi_adjusting = true;
+	try {
+		if (handCount < 4) {
+			await player.draw(4 - handCount);
+			return;
+		}
+		const needDiscard = handCount - 4;
+		const discardable = player.countDiscardableCards(player, "h");
+		if (discardable > 0) {
+			await player
+				.chooseToDiscard({
+					forced: true,
+					position: "h",
+					selectCard: Math.min(needDiscard, discardable),
+					prompt: "武翊：请选择要弃置的牌",
+				})
+				.forResult();
+		}
+	} finally {
+		delete player._suixiang_wuyi_adjusting;
+	}
+}
+
 // ========== 技能选择面板 ==========
 // 优先使用移植自「无名美化」的势小乔 Vue 面板；无名美化缺失时动态 import 失败，
 // 自动回退到引擎原生 chooseButton 面板，不再硬依赖其他扩展。
@@ -563,6 +604,15 @@ export default function () {
 						img: "extension/随想录/image/character/suixiang-shi_xiaoqiao.jpg",
 						dieAudios: ["ext:随想录/audio/die/suixiang-shi_xiaoqiao.mp3"],
 					},
+					// 势赵云：原画由用户提供。
+					"suixiang-shi_zhaoyun": {
+						sex: "male",
+						group: "shu",
+						hp: 4,
+						skills: ["suixiang_wuyi"],
+						names: "赵|云",
+						img: "extension/随想录/image/character/suixiang-shi_zhaoyun.webp",
+					},
 					// 神马超：在原版手杀神马超 mb_shen_machao 基础上再开发。
 					// 性别/势力/体力与原版一致；立绘、阵亡语音为复制进扩展包的原版资源。
 					"suixiang-mb_shen_machao": {
@@ -590,6 +640,7 @@ export default function () {
 				},
 				translate: {
 					"suixiang-shi_xiaoqiao": "势 小乔",
+					"suixiang-shi_zhaoyun": "势 赵云",
 					"suixiang-mb_shen_machao": "神 马超",
 					"suixiang-dm_sunquan": "魔 孙权",
 				},
@@ -1177,6 +1228,434 @@ export default function () {
 						marktext: "魔",
 						intro: { content: "你已入魔" },
 					},
+					suixiang_longhun: {
+						audio: false,
+						mod: {
+							aiOrder(player, card, num) {
+								if (num <= 0 || !player.isPhaseUsing(true) || player.needsToDiscard() < 2) {
+									return num;
+								}
+								if (_status.event.skill == "suixiang_longhun" && card.name == "tao") {
+									return num + 3.6;
+								}
+								let suit = get.suit(card, player);
+								if (suit === "heart") {
+									return num - 3.6;
+								}
+							},
+							aiValue(player, card, num) {
+								if (num <= 0) {
+									return num;
+								}
+								let suit = get.suit(card, player);
+								if (suit === "heart") {
+									return num + 3.6;
+								} else if (suit === "club") {
+									return num + 1;
+								} else if (suit === "spade") {
+									return num + 1.8;
+								}
+							},
+							aiUseful(player, card, num) {
+								if (num <= 0) {
+									return num;
+								}
+								let suit = get.suit(card, player);
+								if (suit === "heart") {
+									return num + 3;
+								} else if (suit === "club") {
+									return num + 1;
+								} else if (suit === "spade") {
+									return num + 1;
+								}
+							},
+						},
+						locked: false,
+						enable: ["chooseToUse", "chooseToRespond"],
+						prompt: "将♦牌当做杀，♥牌当做桃，♣牌当做闪，♠牌当做无懈可击使用或打出",
+						viewAs(cards, player) {
+							if (cards.length) {
+								const suit = get.suit(cards[0], player);
+								let name = { diamond: "sha", club: "shan", heart: "tao", spade: "wuxie" }[suit];
+								if (name) {
+									return { name, nature: name == "sha" ? "fire" : undefined };
+								}
+							}
+							return null;
+						},
+						filter(event, player) {
+							const filter = event.filterCard;
+							const map = { sha: "diamond", shan: "club", tao: "heart", wuxie: "spade" };
+							for (let name of Object.keys(map)) {
+								if (filter(get.autoViewAs({ name, nature: name == "sha" ? "fire" : undefined }, "unsure"), player, event)) {
+									if (player.countCards("hes", { suit: map[name] })) {
+										return true;
+									}
+								}
+							}
+							return false;
+						},
+						selectCard: [1, 2],
+						position: "hes",
+						complexCard: true,
+						filterCard(card, player, event) {
+							if (ui.selected.cards.length) {
+								return get.suit(card, player) == get.suit(ui.selected.cards[0], player);
+							}
+							event = event || get.event();
+							const filter = event._backup.filterCard,
+								suit = get.suit(card, player);
+							const name = { diamond: "sha", club: "shan", heart: "tao", spade: "wuxie" }[suit];
+							if (name) {
+								return filter(get.autoViewAs({ name, nature: name == "sha" ? "fire" : undefined }, "unsure"), player, event);
+							}
+							return false;
+						},
+						getValue(event) {
+							const player = event.player;
+							const list = {};
+							for (let card of player.getCards("hes")) {
+								const suit = get.suit(card, player);
+								if (!list[suit]?.length) {
+									list[suit] = [];
+								}
+								list[suit].add(card);
+							}
+							for (let i in list) {
+								list[i].sort((a, b) => get.value(b) - get.value(a));
+							}
+							return list;
+						},
+						getCheck(event) {
+							const player = event.player,
+								map = { sha: "diamond", shan: "club", tao: "heart", wuxie: "spade" };
+							event.valueList ??= lib.skill.suixiang_longhun.getValue(event);
+							let suit = null,
+								double = true,
+								max = 0;
+							for (let name in map) {
+								let useCard = get.autoViewAs({ name, nature: name == "sha" ? "fire" : undefined }, "unsure");
+								if (!event._backup.filterCard(useCard, player, event)) {
+									continue;
+								} else if (!event.valueList[map[name]]?.length) {
+									continue;
+								}
+								let temp = name == "wuxie" ? 3 : get.order(useCard, player);
+								if (temp <= max) {
+									continue;
+								}
+								suit = map[name];
+								max = temp;
+							}
+							if (suit) {
+								if (event.name != "chooseToUse") {
+									double = false;
+								} else if (suit == "club") {
+									const evt = event.getParent();
+									if (evt?.player && evt?.player?.isIn()) {
+										double = get.effect(evt.player, { name: "guohe_copy2" }, evt.player, player) > 0;
+									}
+								} else if (suit == "heart") {
+									if (event.type == "dying" && event.dying.hp < 0) {
+										double = false;
+									}
+									if (player.countCards("hse", i => get.tag(i, "save") || get.suit(i, player) == "heart") < 3) {
+										double = false;
+									} else {
+										double = player.isPhaseUsing(true) ? player.needsToDiscard() > 0 : player.hp > -1;
+									}
+								} else if (suit == "spade") {
+									if (event.getParent(4).name == "phaseJudge") {
+										double = false;
+									}
+								} else if (suit == "diamond") {
+									const card = get.autoViewAs({ name: "sha", nature: "fire" }, "unsure");
+									const filterTarget = event._backup.filterTarget,
+										range = get.select(event._backup.selectTarget);
+									game.checkMod(card, player, range, "selectTarget", player);
+									const targets = game.filterPlayer(current => {
+										if (typeof filterTarget == "function") {
+											return filterTarget(card, player, current);
+										} else if (typeof filterTarget == "boolean") {
+											return filterTarget;
+										}
+										return false;
+									});
+									if (range[1] < 0 || range[0] == targets.length) {
+										double = targets.reduce((eff, target) => eff + get.effect(target, card, player, player), 0) > 0;
+									}
+									double = targets.some(target => get.effect(target, card, player, player) > 0);
+								}
+							}
+							return [suit, double];
+						},
+						check(card) {
+							const event = get.event(),
+								player = get.player(),
+								cards = ui.selected.cards?.slice();
+							event.getCheck ??= lib.skill.suixiang_longhun.getCheck(event);
+							const [suit, double] = event.getCheck;
+							if (!suit) {
+								return 0;
+							} else if (cards?.length) {
+								if (!double) {
+									return 0;
+								} else if (suit == "heart") {
+									if (event.getTrigger()?.player && event.getTrigger()?.player != player) {
+										if (get.attitude(player, event.getTrigger().player) < 0) {
+											return 0;
+										} else if (
+											(function () {
+												return get.value({ name: "tao" }, player) > get.value(cards.concat([card]), player);
+											})()
+										) {
+											return 0;
+										}
+									}
+								} else if (suit == "spade") {
+									if (event.getTrigger()?.card?.cards?.length) {
+										const gainCardsValue = get.value(event.getTrigger().card.cards, player),
+											useCardValue = get.value(cards.concat([card]), player);
+										if (gainCardsValue < useCardValue) {
+											return 0;
+										}
+									}
+								}
+							}
+							return event.valueList[suit].indexOf(card) + 1;
+						},
+						hiddenCard(player, name) {
+							if (_status.connectMode && name == "wuxie" && player.countCards("hes") > 0) {
+								return true;
+							}
+							let suit = { sha: "diamond", shan: "club", tao: "heart", wuxie: "spade" };
+							return name && name in suit && player.countCards("hes", { suit: suit[name] }) > 0;
+						},
+						ai: {
+							save: true,
+							respondSha: true,
+							respondShan: true,
+							skillTagFilter(player, tag) {
+								let name;
+								switch (tag) {
+									case "respondSha":
+										name = "diamond";
+										break;
+									case "respondShan":
+										name = "club";
+										break;
+									case "save":
+										name = "heart";
+										break;
+								}
+								if (!player.countCards("hes", { suit: name })) {
+									return false;
+								}
+							},
+							order(item, player) {
+								const event = get.event();
+								if (player && event.name == "chooseToUse") {
+									let max = 0;
+									const map = { sha: "diamond", shan: "club", tao: "heart" };
+									for (let name in map) {
+										let card = get.autoViewAs({ name: name, nature: name == "sha" ? "fire" : undefined }, "unsure");
+										if (!event.filterCard(card, player, event)) {
+											continue;
+										} else if (!player.countCards("hes", i => get.suit(i, player) == map[name])) {
+											continue;
+										}
+										let temp = name == "wuxie" ? 3 : get.order(card, player);
+										if (temp > max) {
+											max = temp;
+										}
+									}
+									if (max > 0) {
+										return max * 1.2;
+									}
+								}
+								return 1;
+							},
+						},
+						group: ["suixiang_longhun_effect"],
+						subSkill: {
+							effect: {
+								trigger: {
+									player: "useCard",
+								},
+								forced: true,
+								popup: false,
+								filter(event) {
+									return event.skill == "suixiang_longhun" && event.cards && event.cards.length == 2;
+								},
+								async content(event, trigger, player) {
+									switch (trigger.card.name) {
+										case "tao":
+											await game.doAsyncInOrder(trigger.targets, async target => await target.gainMaxHp());
+											break;
+										case "sha":
+											trigger.effectCount += 2;
+											break;
+										case "shan":
+											if (trigger.respondTo && trigger.respondTo[0]?.isIn()) {
+												trigger.respondTo[0].randomDiscard(2, "he");
+											}
+											break;
+										case "wuxie":
+											trigger.card.storage ??= {};
+											trigger.card.storage.nowuxie = true;
+											trigger.directHit.addArray(game.players);
+											player
+												.when({ global: "eventNeutralized" })
+												.filter(evt => {
+													if (evt.type != "card" && evt.name != "_wuxie") {
+														return false;
+													}
+													return evt._neutralize_event.card == trigger.card;
+												})
+												.then(async (event, trigger, player) => {
+													let cards = trigger.cards.filterInD("od");
+													if (cards.length) {
+														await player.gain(cards, "gain2");
+													}
+												});
+											break;
+									}
+								},
+							},
+						},
+					},
+					suixiang_wuyi: {
+						persevereSkill: true,
+						forced: true,
+						silent: true,
+						popup: false,
+						mark: true,
+						marktext: "翊",
+						init(player, skill) {
+							if (!Array.isArray(player.storage[skill])) {
+								player.storage[skill] = [];
+							}
+							if (getWuyiLevel(player) >= 2) {
+								player.addAdditionalSkill(skill, "suixiang_longhun");
+							}
+						},
+						onremove(player, skill) {
+							player.removeAdditionalSkill(skill, "suixiang_longhun");
+							for (const target of game.filterPlayer((current) => current !== player)) {
+								target.removeSkill("suixiang_wuyi_block");
+							}
+						},
+						trigger: {
+							player: ["useCardAfter", "respondAfter"],
+						},
+						filter(event, player) {
+							if (!event.card || get.type(event.card, null, player) !== "basic") return false;
+							const name = get.name(event.card, player) || event.card.name;
+							return !!name && !getWuyiNames(player).includes(name);
+						},
+						async content(event, trigger, player) {
+							const name = get.name(trigger.card, player) || trigger.card.name;
+							if (!name) return;
+							player.markAuto("suixiang_wuyi", name);
+							const level = getWuyiLevel(player);
+							if (level >= 2 && !player.additionalSkills?.suixiang_wuyi?.includes("suixiang_longhun")) {
+								player.addAdditionalSkill("suixiang_wuyi", "suixiang_longhun");
+							}
+							if (level >= 3) {
+								applyWuyiBlock(player);
+							}
+							if (level >= 4) {
+								await adjustWuyiHand(player);
+							}
+						},
+						mod: {
+							targetInRange(card, player) {
+								if (getWuyiLevel(player) >= 1) {
+									return true;
+								}
+							},
+							cardUsable(card, player) {
+								if (getWuyiLevel(player) >= 1) {
+									return Infinity;
+								}
+							},
+						},
+						group: ["suixiang_wuyi_phase", "suixiang_wuyi_hand"],
+						intro: {
+							content(storage, player) {
+								const names = getWuyiNames(player);
+								const active = [
+									[1, "使用牌无距离和次数限制"],
+									[2, "视为拥有〖龙魂〗"],
+									[3, "你的回合内其他角色的非持恒技能失效"],
+									[4, "手牌数始终为4"],
+								]
+									.filter(([level]) => names.length >= level)
+									.map(([, text]) => text);
+								return "本局已使用或打出" + names.length + "种基本牌牌名：" + (names.map((name) => get.translation(name)).join("、") || "无") + "<br>" + (active.join("<br>") || "尚未达到任何档位");
+							},
+						},
+						subSkill: {
+							phase: {
+								charlotte: true,
+								persevereSkill: true,
+								sourceSkill: "suixiang_wuyi",
+								trigger: { player: "phaseBegin" },
+								forced: true,
+								silent: true,
+								popup: false,
+								async content(event, trigger, player) {
+									applyWuyiBlock(player, true);
+									await adjustWuyiHand(player);
+								},
+							},
+							hand: {
+								charlotte: true,
+								persevereSkill: true,
+								sourceSkill: "suixiang_wuyi",
+								trigger: {
+									global: [
+										"gainAfter",
+										"loseAfter",
+										"loseAsyncAfter",
+										"equipAfter",
+										"addJudgeAfter",
+										"addToExpansionAfter",
+										"cardsDiscardAfter",
+									],
+								},
+								forced: true,
+								silent: true,
+								popup: false,
+								filter(event, player) {
+									return getWuyiLevel(player) >= 4 && player.countCards("h") !== 4 && !player._suixiang_wuyi_adjusting;
+								},
+								async content(event, trigger, player) {
+									await adjustWuyiHand(player);
+								},
+							},
+						},
+					},
+					suixiang_wuyi_block: {
+						charlotte: true,
+						persevereSkill: true,
+						mark: true,
+						marktext: "翊",
+						intro: {
+							content: "本回合你的非持恒技能失效",
+						},
+						init(player, skill) {
+							player.addSkillBlocker(skill);
+						},
+						onremove(player, skill) {
+							player.removeSkillBlocker(skill);
+						},
+						skillBlocker(skill) {
+							if (skill === "suixiang_wuyi_block") return false;
+							const info = lib.skill[skill];
+							return !!info && !info.persevereSkill;
+						},
+					},
 					suixiang_heyun: {
 						audio: "ext:随想录/audio/skill:2",
 						enable: "phaseUse",
@@ -1274,6 +1753,13 @@ export default function () {
 					},
 				},
 				translate: {
+					suixiang_wuyi: "武翊",
+					suixiang_wuyi_info:
+						"持恒技。你本局累计使用或打出过的基本牌牌名数达到：1，你使用牌无距离和次数限制；2，你视为拥有〖龙魂〗；3，你的回合内，其他角色所有未标记为持恒技的技能失效；4，你的手牌数始终为4。",
+					suixiang_longhun: "龙魂",
+					suixiang_longhun_info:
+						"你可以将一至两张牌按下列规则使用或打出：红桃当【桃】，方块当火【杀】，梅花当【闪】，黑桃当【无懈可击】。若你以此法使用的牌为两张：使用的【桃】令目标角色加1点体力上限，使用的火【杀】额外结算两次，使用的【闪】令此【杀】的使用者随机弃置两张牌，使用的【无懈可击】不能被响应且你获得被响应的牌。",
+					suixiang_wuyi_block: "武翊",
 					suixiang_mb_yuli: "驭雳",
 					suixiang_mb_yuli_info:
 						"锁定技。造成的伤害改为雷电伤害，若原版伤害已经是雷电伤害则伤害增加1点。当造成高于1点的雷电伤害时会额外对目标相邻的角色造成一半伤害（向下取整）。受到雷电伤害时免疫雷电伤害并摸等量牌。",
@@ -1341,7 +1827,7 @@ export default function () {
 			},
 			intro: "随想录扩展：所有武将/技能均以 suixiang 为前缀。下载地址：https://github.com/keepermttl/noname-suixianglu",
 			author: "伽拉忒亚",
-			version: "1.3.10",
+			version: "1.3.11",
 		},
 		files: {
 			character: [],
