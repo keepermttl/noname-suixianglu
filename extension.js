@@ -29,6 +29,69 @@ function getWuyiNames(player) {
 function getWuyiLevel(player) {
 	return getWuyiNames(player).length;
 }
+function hasWuyiSkill(player) {
+	return player.hasSkill("suixiang_wuyi", null, null, false);
+}
+function getCuifengUnlocks(player) {
+	const unlocks = player.getStorage("suixiang_cuifeng_unlocked");
+	return Array.isArray(unlocks) ? unlocks : [];
+}
+function refreshCuifengUnlocks(player, force = false) {
+	if (!force && !hasWuyiSkill(player)) return getCuifengUnlocks(player);
+	const additions = ["unrecorded"];
+	for (const name of getWuyiNames(player)) {
+		if (["sha", "shan", "jiu", "tao"].includes(name)) additions.push(name);
+	}
+	const unlocks = getCuifengUnlocks(player);
+	const fresh = additions.filter((name) => !unlocks.includes(name));
+	if (fresh.length) player.markAuto("suixiang_cuifeng_unlocked", fresh);
+	return getCuifengUnlocks(player);
+}
+function getBasicCardNames() {
+	return lib.inpile.filter((name) => get.type(name) === "basic").unique();
+}
+function recordWuyiName(player, name) {
+	if (!name || getWuyiNames(player).includes(name)) return false;
+	player.markAuto("suixiang_wuyi", name);
+	if (hasWuyiSkill(player)) refreshCuifengUnlocks(player);
+	return true;
+}
+async function applyWuyiProgress(player) {
+	if (!hasWuyiSkill(player)) return;
+	const level = getWuyiLevel(player);
+	refreshCuifengUnlocks(player);
+	if (level >= 2 && !player.additionalSkills?.suixiang_wuyi?.includes("suixiang_longhun")) {
+		player.addAdditionalSkill("suixiang_wuyi", "suixiang_longhun");
+	}
+	if (level >= 3) applyWuyiBlock(player);
+	if (level >= 4) await adjustWuyiHand(player);
+}
+function addCuifengJiu(target) {
+	target.addTempSkill("suixiang_cuifeng_jiu", { player: "dieAfter" });
+	target.addMark("suixiang_cuifeng_jiu", 1, false);
+}
+function addCuifengTao(target) {
+	target.addTempSkill("suixiang_cuifeng_tao", { player: "phaseJieshuBegin" });
+}
+function invalidateCuifengResponse(event) {
+	const response = event.getParent?.("chooseToRespond");
+	const result = {
+		...(response?.result && typeof response.result === "object" ? response.result : {}),
+		bool: false,
+		card: null,
+		cards: [],
+	};
+	if (response) response.result = result;
+	event.result = result;
+}
+function getCuifengDuelContext(event, player) {
+	const use = event.getParent((current) => current.name === "useCard" && current.card?.name === "juedou");
+	if (!use || use.player !== player || !Array.isArray(use.targets)) return null;
+	const snapshot = use.suixiang_cuifeng_snapshot;
+	if (!snapshot || !Array.isArray(snapshot.unlocks)) return null;
+	if (!use.targets.includes(event.player)) return null;
+	return { use, snapshot };
+}
 function applyWuyiBlock(player, force = false) {
 	if (getWuyiLevel(player) < 3 || (!force && _status.currentPhase !== player)) return;
 	for (const target of game.filterPlayer((current) => current !== player)) {
@@ -609,7 +672,7 @@ export default function () {
 						sex: "male",
 						group: "shu",
 						hp: 4,
-						skills: ["suixiang_wuyi"],
+						skills: ["suixiang_wuyi", "suixiang_cuifeng"],
 						names: "赵|云",
 						img: "extension/随想录/image/character/suixiang-shi_zhaoyun.webp",
 					},
@@ -1535,6 +1598,7 @@ export default function () {
 							if (!Array.isArray(player.storage[skill])) {
 								player.storage[skill] = [];
 							}
+							refreshCuifengUnlocks(player);
 							if (getWuyiLevel(player) >= 2) {
 								player.addAdditionalSkill(skill, "suixiang_longhun");
 							}
@@ -1556,17 +1620,7 @@ export default function () {
 						async content(event, trigger, player) {
 							const name = get.name(trigger.card, player) || trigger.card.name;
 							if (!name) return;
-							player.markAuto("suixiang_wuyi", name);
-							const level = getWuyiLevel(player);
-							if (level >= 2 && !player.additionalSkills?.suixiang_wuyi?.includes("suixiang_longhun")) {
-								player.addAdditionalSkill("suixiang_wuyi", "suixiang_longhun");
-							}
-							if (level >= 3) {
-								applyWuyiBlock(player);
-							}
-							if (level >= 4) {
-								await adjustWuyiHand(player);
-							}
+							if (recordWuyiName(player, name)) await applyWuyiProgress(player);
 						},
 						mod: {
 							targetInRange(card, player) {
@@ -1633,6 +1687,144 @@ export default function () {
 								async content(event, trigger, player) {
 									await adjustWuyiHand(player);
 								},
+							},
+						},
+					},
+					suixiang_cuifeng: {
+						persevereSkill: true,
+						trigger: { global: "phaseBegin" },
+						filter(event, player) {
+							return player.isIn() && game.hasPlayer((current) => current !== player && current.isIn());
+						},
+						async cost(event, trigger, player) {
+							event.result = await player
+								.chooseTarget({
+									prompt: "摧锋：选择一名其他角色使用【决斗】",
+									filterTarget(card, player2, target) {
+										return target !== player2 && target.isIn();
+									},
+									ai(target) {
+										const player2 = get.player();
+										return get.effect(target, { name: "juedou" }, player2, player2);
+									},
+								})
+								.forResult();
+						},
+						async content(event, trigger, player) {
+							const target = event.targets?.[0];
+							if (!target || !target.isIn()) return;
+							const names = getWuyiNames(player).slice();
+							const unlocks = refreshCuifengUnlocks(player).slice();
+							const snapshot = { names, unlocks };
+							const next = player.useCard({
+								card: { name: "juedou" },
+								targets: [target],
+								addCount: false,
+							});
+							next.suixiang_cuifeng_snapshot = snapshot;
+							next.oncard = () => {
+								if (unlocks.includes("sha")) {
+									next.customArgs[target.playerid] ??= {};
+									next.customArgs[target.playerid].extraDamage = names.length;
+								}
+								if (unlocks.includes("shan")) next.directHit.add(target);
+							};
+							await next;
+						},
+						group: ["suixiang_cuifeng_damage"],
+						ai: {
+							order: 1,
+							result: {
+								target(player, target) {
+									return get.effect(target, { name: "juedou" }, player, player);
+								},
+							},
+						},
+						subSkill: {
+							damage: {
+								charlotte: true,
+								persevereSkill: true,
+								sourceSkill: "suixiang_cuifeng",
+								trigger: { global: "damage" },
+								forced: true,
+								silent: true,
+								popup: false,
+								priority: Infinity,
+								filter(event, player) {
+									if (!event.num || event.num <= 0) return false;
+									const context = getCuifengDuelContext(event, player);
+									if (!context) return false;
+									const { unlocks } = context.snapshot;
+									if (unlocks.includes("jiu") || unlocks.includes("tao")) return true;
+									if (unlocks.includes("unrecorded")) {
+										return getBasicCardNames().some((name) => !getWuyiNames(player).includes(name));
+									}
+									return false;
+								},
+								async content(event, trigger, player) {
+									const context = getCuifengDuelContext(trigger, player);
+									if (!context) return;
+									const { snapshot } = context;
+									const { unlocks } = snapshot;
+									if (unlocks.includes("unrecorded")) {
+										const candidates = getBasicCardNames().filter((name) => !getWuyiNames(player).includes(name));
+										if (candidates.length) {
+											const name = candidates.randomGet();
+											if (recordWuyiName(player, name)) await applyWuyiProgress(player);
+										}
+									}
+									if (unlocks.includes("jiu")) addCuifengJiu(trigger.player);
+									if (unlocks.includes("tao")) addCuifengTao(trigger.player);
+								},
+							},
+							jiu: {
+								charlotte: true,
+								persevereSkill: true,
+								mark: true,
+								marktext: "酒",
+								intro: {
+									content(storage) {
+										return `之后${storage || 0}张牌无效`;
+									},
+								},
+								trigger: { player: ["useCard", "respond"] },
+								forced: true,
+								silent: true,
+								popup: false,
+								priority: Infinity,
+								filter(event, player) {
+									return player.countMark("suixiang_cuifeng_jiu") > 0 && !!event.card;
+								},
+								content(event, trigger, player) {
+									const count = player.countMark("suixiang_cuifeng_jiu");
+									player.removeMark("suixiang_cuifeng_jiu", 1, false);
+									if (count <= 1) player.removeSkill("suixiang_cuifeng_jiu");
+									if (trigger.name === "useCard") {
+										trigger.targets.length = 0;
+										trigger.all_excluded = true;
+										game.log(trigger.card, "被无效了");
+									} else {
+										invalidateCuifengResponse(trigger);
+									}
+								},
+								onremove: true,
+							},
+							tao: {
+								charlotte: true,
+								persevereSkill: true,
+								mark: true,
+								marktext: "桃",
+								intro: {
+									content: "不能回复体力直到其下一个回合结束阶段开始时",
+								},
+								trigger: { player: "recoverBefore" },
+								forced: true,
+								silent: true,
+								popup: false,
+								content(event, trigger) {
+									trigger.cancel();
+								},
+								onremove: true,
 							},
 						},
 					},
@@ -1755,10 +1947,15 @@ export default function () {
 				translate: {
 					suixiang_wuyi: "武翊",
 					suixiang_wuyi_info:
-						"持恒技。你本局累计使用或打出过的基本牌牌名数达到：1，你使用牌无距离和次数限制；2，你视为拥有〖龙魂〗；3，你的回合内，其他角色所有未标记为持恒技的技能失效；4，你的手牌数始终为4。",
+						"持恒技。你使用或打出过的基本牌牌名数达到1种时，你使用牌无距离和次数限制；达到2种时，你视为拥有〖龙魂〗；达到3种时，你的回合内其他角色的非持恒技失效；达到4种时，你的手牌数始终为4。",
 					suixiang_longhun: "龙魂",
 					suixiang_longhun_info:
 						"你可以将一至两张牌按下列规则使用或打出：红桃当【桃】，方块当火【杀】，梅花当【闪】，黑桃当【无懈可击】。若你以此法使用的牌为两张：使用的【桃】令目标角色加1点体力上限，使用的火【杀】额外结算两次，使用的【闪】令此【杀】的使用者随机弃置两张牌，使用的【无懈可击】不能被响应且你获得被响应的牌。",
+					suixiang_cuifeng: "摧锋",
+					suixiang_cuifeng_info:
+						"持恒技。每个回合开始时，你可以对一名其他角色使用【决斗】。你拥有〖武翊〗时解锁“未记录”效果；〖武翊〗记录【杀】、【闪】、【酒】、【桃】后分别解锁对应效果。已解锁的效果永久生效：未记录，造成伤害后随机记录一个未记录的基本牌名；【杀】，此【决斗】造成的伤害+X（X为〖武翊〗记录的牌名数）；【闪】，此【决斗】不可响应；【酒】，其受到此【决斗】伤害后，其下一张使用或打出的牌无效；【桃】，其受到此【决斗】伤害后，直到其下一个回合结束阶段开始时不能回复体力。",
+					suixiang_cuifeng_jiu: "摧锋·酒",
+					suixiang_cuifeng_tao: "摧锋·桃",
 					suixiang_wuyi_block: "武翊",
 					suixiang_mb_yuli: "驭雳",
 					suixiang_mb_yuli_info:
@@ -1827,7 +2024,7 @@ export default function () {
 			},
 			intro: "随想录扩展：所有武将/技能均以 suixiang 为前缀。下载地址：https://github.com/keepermttl/noname-suixianglu",
 			author: "伽拉忒亚",
-			version: "1.3.11",
+			version: "1.3.12",
 		},
 		files: {
 			character: [],

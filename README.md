@@ -1,6 +1,6 @@
 # 随想录 · 无名杀扩展
 
-![Version](https://img.shields.io/badge/version-1.3.11-blue)
+![Version](https://img.shields.io/badge/version-1.3.12-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Platform](https://img.shields.io/badge/platform-noname%201.11.x-orange)
 
@@ -11,7 +11,7 @@
 | 武将 | 势力 | 体力 | 技能 |
 | --- | --- | --- | --- |
 | 势 小乔（`suixiang-shi_xiaoqiao`） | 吴 | 3/3 | 和韵 `suixiang_heyun`、音洄 `suixiang_yinhui` |
-| 势 赵云（`suixiang-shi_zhaoyun`） | 蜀 | 4 | 武翊 `suixiang_wuyi` |
+| 势 赵云（`suixiang-shi_zhaoyun`） | 蜀 | 4 | 武翊 `suixiang_wuyi`、摧锋 `suixiang_cuifeng` |
 | 神 马超（`suixiang-mb_shen_machao`） | 神 | 4 | 驭雳 `suixiang_mb_yuli`、霆威 `suixiang_mb_tingwei`、寂灭 `suixiang_mb_jimie` |
 | 魔 孙权（`suixiang-dm_sunquan`） | 魔 | 4 | 权御 `suixiang_olquanyu`、天恩 `suixiang_oltianen`、乾纲 `suixiang_olqiangang` |
 
@@ -19,9 +19,13 @@
 
 ### 武翊（势 赵云 · 持恒技）
 
-本局累计使用或打出过的基本牌牌名数达到：1，你使用牌无距离和次数限制；2，你视为拥有〖龙魂〗；3，你的回合内，其他角色所有未标记为持恒技的技能失效；4，你的手牌数始终为 4。
+你使用或打出过的基本牌牌名数达到1种时，你使用牌无距离和次数限制；达到2种时，你视为拥有〖龙魂〗；达到3种时，你的回合内其他角色的非持恒技失效；达到4种时，你的手牌数始终为4。
 
 〖龙魂〗代码已移植至随想录，不依赖极略扩展；当前未配置技能语音。
+
+### 摧锋（势 赵云 · 持恒技）
+
+每个回合开始时，你可以对一名其他角色使用【决斗】。你拥有〖武翊〗时解锁“未记录”效果；〖武翊〗记录【杀】、【闪】、【酒】、【桃】后分别解锁对应效果。已解锁的效果永久生效：未记录，造成伤害后随机记录一个未记录的基本牌名；【杀】，此【决斗】造成的伤害+X（X为〖武翊〗记录的牌名数）；【闪】，此【决斗】不可响应；【酒】，其受到此【决斗】伤害后，其下一张使用或打出的牌无效；【桃】，其受到此【决斗】伤害后，直到其下一个回合结束阶段开始时不能回复体力。
 
 ### 和韵（势 小乔）
 
@@ -102,7 +106,7 @@
 
 - 代码遵循无名杀 1.11.x async 写法与对象参数规范；
 - 命名规范：所有武将/技能编码以 `suixiang` 为前缀，带名称外前缀的武将按 `扩展词缀-武将词缀_武将名` 编码；
-- 版本历史（每个版本均有对应 `release-vX.Y.Z` 分支与 GitHub Release）：v1.1.0 神 马超·驭雳 → v1.2.0 霆威 → v1.3.0 寂灭（神 马超齐备）→ v1.3.5 魔 孙权（权御重构+天恩）→ v1.3.7 乾纲 → v1.3.9 魔势力修正 → v1.3.10 天恩判定优化 → v1.3.11 势 赵云·武翊。
+- 版本历史（每个版本均有对应 `release-vX.Y.Z` 分支与 GitHub Release）：v1.1.0 神 马超·驭雳 → v1.2.0 霆威 → v1.3.0 寂灭（神 马超齐备）→ v1.3.5 魔 孙权（权御重构+天恩）→ v1.3.7 乾纲 → v1.3.9 魔势力修正 → v1.3.10 天恩判定优化 → v1.3.11 势 赵云·武翊 → v1.3.12 势 赵云·摧锋。
 
 ## License
 
