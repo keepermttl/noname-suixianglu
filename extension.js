@@ -643,6 +643,155 @@ function setupSunquanCompat() {
 	}
 }
 
+// ========== 势赵云与美化扩展兼容 ==========
+// 随想录使用独立武将/技能 id，因此把动皮、千幻语音及无名美化特效分别映射到
+// 原版势赵云 pot_zhaoyun，同时保留随想录自己的技能逻辑，避免原版技能重复触发。
+function setupZhaoyunCompat() {
+	// 十周年 UI / 皮肤切换：共享原版势赵云的动皮配置。
+	if (window.decadeUI?.dynamicSkin) {
+		const source = window.decadeUI.dynamicSkin.pot_zhaoyun || window.decadeUI.dynamicSkin.zhaoyun;
+		if (source && !window.decadeUI.dynamicSkin["suixiang-shi_zhaoyun"]) {
+			window.decadeUI.dynamicSkin["suixiang-shi_zhaoyun"] = source;
+		}
+	}
+	// 千幻聆音：技能语音按原版技能查找皮肤语音；龙魂为武翊的衍生技能，
+	// 共享武翊语音最符合原版势赵云的语音分组。
+	if (lib.qhly_skinShare) {
+		const share = lib.qhly_skinShare["suixiang-shi_zhaoyun"] || {};
+		share.name ||= "pot_zhaoyun";
+		share.skills ||= {};
+		Object.assign(share.skills, {
+			suixiang_wuyi: "potwuyi",
+			suixiang_longhun: "potwuyi",
+			suixiang_cuifeng: "potcuifeng",
+		});
+		lib.qhly_skinShare["suixiang-shi_zhaoyun"] = share;
+	}
+
+	// 无名美化特效是可选依赖。未安装或未开启势赵云特效时，随想录保持原有行为。
+	if (!lib.config?.["extension_无名美化_shizhaoyun"] || !window.dcdAnim || !lib.skill) return;
+	const dcdAnim = window.dcdAnim;
+	if (typeof dcdAnim.loadSpine !== "function" || typeof dcdAnim.playSpine !== "function") return;
+	const animations = {
+		shan: { name: "../../../无名美化/animation/shizhaoyun/shan/SS_szy_shan" },
+		huoSha: { name: "../../../无名美化/animation/shizhaoyun/sha/SS_szy_huosha" },
+		leiSha: { name: "../../../无名美化/animation/shizhaoyun/sha/SS_szy_leisha" },
+		sha: { name: "../../../无名美化/animation/shizhaoyun/sha/SS_szy_sha" },
+		longlin: {
+			loop: true,
+			name: "../../../无名美化/animation/shizhaoyun/handCardArea/SS_szy_longlin",
+		},
+		kuangfangda: { name: "../../../无名美化/animation/shizhaoyun/head/SS_szy_kuangfangda" },
+		kuanglizi: {
+			loop: true,
+			name: "../../../无名美化/animation/shizhaoyun/head/SS_szy_kuanglizi",
+		},
+	};
+	const playAnimation = (animation, params = {}, player, storageKey) => {
+		if (!animation) return;
+		try {
+			dcdAnim.loadSpine(animation.name, "skel", () => {
+				try {
+					const instance = dcdAnim.playSpine(animation, params);
+					if (player && storageKey) {
+						player.storage[storageKey] = instance;
+					}
+				} catch (e) {}
+			});
+		} catch (e) {}
+	};
+	const setShiFrame = player => {
+		const frame = player?.querySelector?.(".camp-back");
+		if (frame) frame.style.background = "linear-gradient(to top, #dba825, #ac9724)";
+	};
+	const playLonglin = player => {
+		const effectApi = window.skinSwitch?.chukuangWorkerApi;
+		if (!effectApi || typeof effectApi.playEffect2 !== "function" || typeof document === "undefined") return;
+		const handcards = document.querySelector?.(".handcards");
+		if (!handcards) return;
+		const handWrap = document.querySelector?.(".hand-wrap");
+		if (handWrap) handWrap.style.zIndex = 5;
+		window._SS_szy_longlin = animations.longlin;
+		try {
+			effectApi.playEffect2(animations.longlin, { parent: handcards, scale: 0.5 });
+		} catch (e) {}
+	};
+	const playWuyiAwakening = player => {
+		if (!player || getWuyiLevel(player) < 4 || player._suixiang_zhaoyun_awakened) return;
+		player._suixiang_zhaoyun_awakened = true;
+		setShiFrame(player);
+		playAnimation(animations.kuanglizi, { parent: player, scale: 0.82 }, player, "_suixiang_zhaoyun_kuanglizi");
+		playLonglin(player);
+	};
+	const getCardAnimation = card => {
+		if (!card) return null;
+		const name = get.name(card) || card.name;
+		const nature = get.nature(card);
+		if (name === "shan") return animations.shan;
+		if (name !== "sha") return null;
+		if (nature === "fire") return animations.huoSha;
+		if (nature === "thunder") return animations.leiSha;
+		return animations.sha;
+	};
+	const playCardAnimation = (card, player) => {
+		const animation = getCardAnimation(card);
+		if (animation) playAnimation(animation, {}, player, "_suixiang_zhaoyun_card");
+	};
+
+	const wuyi = lib.skill.suixiang_wuyi;
+	if (wuyi && !wuyi._suixiangZhaoyunCompat) {
+		wuyi._suixiangZhaoyunCompat = true;
+		const originInit = wuyi.init;
+		const originFilter = wuyi.filter;
+		const originContent = wuyi.content;
+		if (typeof originInit === "function") {
+			wuyi.init = function (player, skill) {
+				const result = originInit.call(this, player, skill);
+				playWuyiAwakening(player);
+				return result;
+			};
+		}
+		if (typeof originFilter === "function") {
+			wuyi.filter = function (event, player, ...args) {
+				if (getWuyiLevel(player) >= 4) {
+					playAnimation(animations.kuangfangda, { parent: player, scale: 0.82 });
+				}
+				return originFilter.call(this, event, player, ...args);
+			};
+		}
+		if (typeof originContent === "function") {
+			wuyi.content = async function (event, trigger, player) {
+				const result = await originContent.call(this, event, trigger, player);
+				playWuyiAwakening(player);
+				return result;
+			};
+		}
+	}
+
+	const longhun = lib.skill.suixiang_longhun;
+	if (longhun && !longhun._suixiangZhaoyunCompat) {
+		longhun._suixiangZhaoyunCompat = true;
+		longhun.subSkill ||= {};
+		longhun.subSkill.zhaoyunAnim = {
+			charlotte: true,
+			silent: true,
+			popup: false,
+			trigger: { player: ["useCard", "respond"] },
+			forced: true,
+			filter(event) {
+				return event.skill === "suixiang_longhun" && !!event.card;
+			},
+			content(event, trigger, player) {
+				playCardAnimation(trigger.card, player);
+			},
+		};
+		longhun.group ||= [];
+		if (!longhun.group.includes("suixiang_longhun_zhaoyunAnim")) {
+			longhun.group.push("suixiang_longhun_zhaoyunAnim");
+		}
+	}
+}
+
 export const type = "extension";
 
 export default function () {
@@ -652,8 +801,10 @@ export default function () {
 			// 立即尝试（美化扩展已加载时生效），并在游戏就绪后兜底（美化扩展后加载时生效）
 			setupShenMachaoCompat();
 			setupSunquanCompat();
+			setupZhaoyunCompat();
 			lib.arenaReady.push(setupShenMachaoCompat);
 			lib.arenaReady.push(setupSunquanCompat);
+			lib.arenaReady.push(setupZhaoyunCompat);
 		},
 		package: {
 			character: {
@@ -668,14 +819,15 @@ export default function () {
 						img: "extension/随想录/image/character/suixiang-shi_xiaoqiao.jpg",
 						dieAudios: ["ext:随想录/audio/die/suixiang-shi_xiaoqiao.mp3"],
 					},
-					// 势赵云：原画由用户提供。
+					// 势赵云：原画、阵亡语音与技能语音由用户提供的 PR 包接入。
 					"suixiang-shi_zhaoyun": {
 						sex: "male",
 						group: "shu",
 						hp: 4,
 						skills: ["suixiang_wuyi", "suixiang_cuifeng"],
 						names: "赵|云",
-						img: "extension/随想录/image/character/suixiang-shi_zhaoyun.webp",
+						img: "extension/随想录/image/character/suixiang-shi_zhaoyun.jpg",
+						dieAudios: ["ext:随想录/audio/die/suixiang-shi_zhaoyun.mp3"],
 					},
 					// 神马超：在原版手杀神马超 mb_shen_machao 基础上再开发。
 					// 性别/势力/体力与原版一致；立绘、阵亡语音为复制进扩展包的原版资源。
@@ -1293,7 +1445,7 @@ export default function () {
 						intro: { content: "你已入魔" },
 					},
 					suixiang_longhun: {
-						audio: false,
+						audio: "ext:随想录/audio/skill:2",
 						mod: {
 							aiOrder(player, card, num) {
 								if (num <= 0 || !player.isPhaseUsing(true) || player.needsToDiscard() < 2) {
@@ -1589,6 +1741,11 @@ export default function () {
 						},
 					},
 					suixiang_wuyi: {
+						audio: "ext:随想录/audio/skill:2",
+						logAudio(_event, player) {
+							const level = Math.max(1, Math.min(4, getWuyiLevel(player)));
+							return `ext:随想录/audio/skill/suixiang_wuyi${level}.mp3`;
+						},
 						persevereSkill: true,
 						forced: true,
 						silent: true,
@@ -1621,7 +1778,10 @@ export default function () {
 						async content(event, trigger, player) {
 							const name = get.name(trigger.card, player) || trigger.card.name;
 							if (!name) return;
-							if (recordWuyiName(player, name)) await applyWuyiProgress(player);
+							if (recordWuyiName(player, name)) {
+								game.trySkillAudio?.("suixiang_wuyi", player, true, null, null, [trigger, player]);
+								await applyWuyiProgress(player);
+							}
 						},
 						mod: {
 							targetInRange(card, player) {
@@ -1692,6 +1852,7 @@ export default function () {
 						},
 					},
 					suixiang_cuifeng: {
+						audio: "ext:随想录/audio/skill:4",
 						persevereSkill: true,
 						trigger: { global: "phaseBegin" },
 						filter(event, player) {
@@ -1781,6 +1942,12 @@ export default function () {
 								async content(event, trigger, player) {
 									const context = getCuifengDuelContext(trigger, player);
 									if (!context) return;
+									game.trySkillAudio?.("suixiang_cuifeng", player, true, null, {
+										audio: [
+											"ext:随想录/audio/skill/suixiang_cuifeng3.mp3",
+											"ext:随想录/audio/skill/suixiang_cuifeng4.mp3",
+										],
+									});
 									const { snapshot } = context;
 									const { unlocks } = snapshot;
 									if (unlocks.includes("unrecorded")) {
@@ -1967,12 +2134,23 @@ export default function () {
 					suixiang_wuyi: "武翊",
 					suixiang_wuyi_info:
 						"持恒技。你本局累计使用或打出过的基本牌牌名数达到1种时，你使用牌无距离和次数限制；达到2种时，你视为拥有〖龙魂〗；达到3种时，你的回合内其他角色的非持恒技失效；达到4种时，你的手牌数始终为4。",
+					// 势赵云语音：武翊按记录牌名阶段使用第1-4句，龙魂使用第5-6句，摧锋使用完整4句。
+					"#ext:随想录/audio/skill/suixiang_wuyi1": "年少自仗心胆，扬名岂须待时？",
+					"#ext:随想录/audio/skill/suixiang_wuyi2": "百战征袍不染，枪破万军无还！",
+					"#ext:随想录/audio/skill/suixiang_wuyi3": "海角终有尽，天涯必可及！",
+					"#ext:随想录/audio/skill/suixiang_wuyi4": "勇略已超天下将，再炽心气问天高！",
 					suixiang_longhun: "龙魂",
 					suixiang_longhun_info:
 						"你可以将一至两张牌按下列规则使用或打出：红桃当【桃】，方块当火【杀】，梅花当【闪】，黑桃当【无懈可击】。若你以此法使用的牌为两张：使用的【桃】令目标角色加1点体力上限，使用的火【杀】额外结算两次，使用的【闪】令此【杀】的使用者随机弃置两张牌，使用的【无懈可击】不能被响应且你获得被响应的牌。",
+					"#ext:随想录/audio/skill/suixiang_longhun1": "见吾银枪白马，当知胜负已分。",
+					"#ext:随想录/audio/skill/suixiang_longhun2": "此战胜已在胸，自立不败之地。",
 					suixiang_cuifeng: "摧锋",
 					suixiang_cuifeng_info:
 						"持恒技。每轮限两次。每个回合开始时，你可以对一名其他角色使用【决斗】。你拥有〖武翊〗时解锁“未记录”效果；〖武翊〗记录【杀】、【闪】、【酒】、【桃】后分别解锁对应效果。已解锁的效果永久生效：未记录，造成伤害后随机记录一个未记录的基本牌名；【杀】，此【决斗】造成的伤害+X（X为〖武翊〗记录的牌名数）；【闪】，此【决斗】不可响应；【酒】，其受到此【决斗】伤害后，其下一张使用或打出的牌无效；【桃】，其受到此【决斗】伤害后，直到其下一个回合结束阶段开始时不能回复体力。",
+					"#ext:随想录/audio/skill/suixiang_cuifeng1": "纵对千军万马，云亦独往矣！",
+					"#ext:随想录/audio/skill/suixiang_cuifeng2": "冲阵斩将者，常山赵子龙也！",
+					"#ext:随想录/audio/skill/suixiang_cuifeng3": "凡吾枪所向，必一往无前！",
+					"#ext:随想录/audio/skill/suixiang_cuifeng4": "七破绝境，此枪砥砺更利！",
 					suixiang_cuifeng_jiu: "摧锋·酒",
 					suixiang_cuifeng_tao: "摧锋·桃",
 					suixiang_wuyi_block: "武翊",
@@ -2037,13 +2215,14 @@ export default function () {
 					"#ext:随想录/audio/skill/suixiang_mb_jimie2": "赐万物寂然，赐万界终灭！",
 					"#ext:随想录/audio/skill/suixiang_mb_jimie3": "此世终末之时，我将再度照临！",
 					"#ext:随想录/audio/skill/suixiang_mb_jimie4": "我乃万法之法，戮神之神！",
+					"#ext:随想录/audio/die/suixiang-shi_zhaoyun:die": "吾平生未有败事，岂料今日，…呃…",
 					"#ext:随想录/audio/die/suixiang-mb_shen_machao:die": "我裁万世，何以裁我……",
 					"#ext:随想录/audio/die/suixiang-dm_sunquan:die": "朕非朕，天下皆朕！",
 				},
 			},
 			intro: "随想录扩展：所有武将/技能均以 suixiang 为前缀。下载地址：https://github.com/keepermttl/noname-suixianglu",
 			author: "伽拉忒亚",
-			version: "1.3.13",
+			version: "1.3.14",
 		},
 		files: {
 			character: [],
