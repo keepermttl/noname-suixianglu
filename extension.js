@@ -771,6 +771,10 @@ function setupZhaoyunCompat() {
 	const longhun = lib.skill.suixiang_longhun;
 	if (longhun && !longhun._suixiangZhaoyunCompat) {
 		longhun._suixiangZhaoyunCompat = true;
+		// 技能 content 会被无名杀的 StepCompiler 编译成独立函数，不能直接捕获
+		// setupZhaoyunCompat 的局部变量。把闭包函数挂到技能对象上，供编译后的
+		// content 通过 lib 访问，避免运行时出现“playCardAnimation 未定义”。
+		longhun._suixiangZhaoyunPlayCardAnimation = playCardAnimation;
 		longhun.subSkill ||= {};
 		longhun.subSkill.zhaoyunAnim = {
 			charlotte: true,
@@ -782,7 +786,7 @@ function setupZhaoyunCompat() {
 				return event.skill === "suixiang_longhun" && !!event.card;
 			},
 			content(event, trigger, player) {
-				playCardAnimation(trigger.card, player);
+				lib.skill.suixiang_longhun._suixiangZhaoyunPlayCardAnimation(trigger.card, player);
 			},
 		};
 		longhun.group ||= [];

@@ -1,6 +1,6 @@
 # 随想录 · 无名杀扩展
 
-![Version](https://img.shields.io/badge/version-1.3.14-blue)
+![Version](https://img.shields.io/badge/version-1.3.15-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![Platform](https://img.shields.io/badge/platform-noname%201.11.x-orange)
 
@@ -108,7 +108,7 @@
 
 - 代码遵循无名杀 1.11.x async 写法与对象参数规范；
 - 命名规范：所有武将/技能编码以 `suixiang` 为前缀，带名称外前缀的武将按 `扩展词缀-武将词缀_武将名` 编码；
-- 版本历史（每个版本均有对应 `release-vX.Y.Z` 分支与 GitHub Release）：v1.1.0 神 马超·驭雳 → v1.2.0 霆威 → v1.3.0 寂灭（神 马超齐备）→ v1.3.5 魔 孙权（权御重构+天恩）→ v1.3.7 乾纲 → v1.3.9 魔势力修正 → v1.3.10 天恩判定优化 → v1.3.11 势 赵云·武翊 → v1.3.12 势 赵云·摧锋 → v1.3.13 摧锋限制与伤害判定修复 → v1.3.14 势赵云资源、技能语音与美化兼容。
+- 版本历史（每个版本均有对应 `release-vX.Y.Z` 分支与 GitHub Release）：v1.1.0 神 马超·驭雳 → v1.2.0 霆威 → v1.3.0 寂灭（神 马超齐备）→ v1.3.5 魔 孙权（权御重构+天恩）→ v1.3.7 乾纲 → v1.3.9 魔势力修正 → v1.3.10 天恩判定优化 → v1.3.11 势 赵云·武翊 → v1.3.12 势 赵云·摧锋 → v1.3.13 摧锋限制与伤害判定修复 → v1.3.14 势赵云资源、技能语音与美化兼容 → v1.3.15 修复势赵云龙魂美化动画在 StepCompiler 下的运行时错误。
 
 ## License
 
