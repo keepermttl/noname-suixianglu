@@ -13,6 +13,99 @@ function getStealableSkills(player) {
 	});
 }
 
+function isKemingTransferableSkill(skill) {
+	if (!lib.translate[skill] || !lib.translate[skill + "_info"]) return false;
+	const info = get.info(skill);
+	return !!info && !info.charlotte && !info.sub && !info.hidden;
+}
+
+function getKemingTargetCharacterNames(target) {
+	return [...new Set([target.name1, target.name2, target.name].filter((name) => name && get.character(name)))];
+}
+
+function getKemingTargetSkillOptions(target, skills) {
+	const characters = getKemingTargetCharacterNames(target);
+	const fallback = characters[0] || "shibing";
+	return skills.map((skill) => ({
+		skill,
+		character: characters.find((name) => (get.character(name)?.skills || []).includes(skill)) || fallback,
+	}));
+}
+
+function getKemingCharacterPool(target, excludedSkills = [], pool = "surname") {
+	if (!_status.characterlist) game.initCharacterList();
+	const excluded = new Set(excludedSkills);
+	const targetNames = getKemingTargetCharacterNames(target);
+	const surnames = new Set(
+		targetNames.flatMap((name) => get.characterSurname(name).map(([surname]) => surname).filter(Boolean)),
+	);
+	return (_status.characterlist || [])
+		.filter((name) => {
+			const info = get.character(name);
+			return (
+				info &&
+				!targetNames.includes(name) &&
+				get.characterSurname(name).some(([surname]) => (pool === "cao" ? surname === "曹" : surnames.has(surname))) &&
+				(info.skills || []).some((skill) => isKemingTransferableSkill(skill) && !excluded.has(skill))
+			);
+		});
+}
+
+function getKemingSurnameSkillOptions(target, excludedSkills = [], pool = "surname") {
+	const characters = getKemingCharacterPool(target, excludedSkills, pool).randomGets(3);
+	const excluded = new Set(excludedSkills);
+	const options = new Map();
+	for (const name of characters) {
+		for (const skill of get.character(name)?.skills || []) {
+			if (isKemingTransferableSkill(skill) && !excluded.has(skill) && !options.has(skill)) options.set(skill, name);
+		}
+	}
+	return [...options].map(([skill, character]) => ({ skill, character }));
+}
+
+function getKemingSkillChoiceDialog(title, options) {
+	// 原生 skill 按钮以来源武将立绘作底图，右键可查看技能描述。
+	const buttons = options.map(({ skill, character }) => [skill, character]);
+	return [title, [buttons, "skill"]];
+}
+
+function getKemingDamageTarget(event, triggername) {
+	return triggername === "damageSource" ? event.player : event.source;
+}
+
+const yinzhiBlockSkill = "suixiang_dc_yinzhi_block";
+const yinzhiTurnSkill = "suixiang_dc_yinzhi_turn";
+
+function getYinzhiTurnTag(player) {
+	return `${yinzhiTurnSkill}_${player.playerid}`;
+}
+
+function getYinzhiCardMaterials(card) {
+	if (get.itemtype(card) === "card") return [card];
+	return card?.cards || [];
+}
+
+function yinzhiUsedHandCard(event, player) {
+	if (event.getl?.(player)?.hs?.length) return true;
+	return player.getHistory("lose", (loss) => loss.parent === event && loss.hs?.length > 0).length > 0;
+}
+
+function removeYinzhiOwner(owner) {
+	const ownerId = owner.playerid;
+	for (const target of game.players.concat(game.dead)) {
+		const block = target.storage[yinzhiBlockSkill];
+		if (block?.owners?.includes(ownerId)) {
+			block.owners.remove(ownerId);
+			if (!block.owners.length) target.removeSkill(yinzhiBlockSkill);
+		}
+		const turn = target.storage[yinzhiTurnSkill];
+		if (turn?.owners?.includes(ownerId)) {
+			turn.owners.remove(ownerId);
+			if (!turn.owners.length) target.removeSkill(yinzhiTurnSkill);
+		}
+	}
+}
+
 // 濒死标记（联机同步的布尔 storage）
 function setHeyunDyingFlag(player, value) {
 	player.storage.suixiang_heyun_dying = value;
@@ -1059,6 +1152,22 @@ function setupMouZhugeliangCompat() {
 	}
 }
 
+// 神曹丕：共享新杀神曹丕的十周年动皮与千幻聆音皮肤库。
+function setupShenCaopiCompat() {
+	if (window.decadeUI?.dynamicSkin) {
+		const source = window.decadeUI.dynamicSkin.dc_shen_caopi;
+		if (source && !window.decadeUI.dynamicSkin["suixiang-dc_shen_caopi"]) {
+			window.decadeUI.dynamicSkin["suixiang-dc_shen_caopi"] = source;
+		}
+	}
+	if (lib.qhly_skinShare) {
+		lib.qhly_skinShare["suixiang-dc_shen_caopi"] = {
+			name: "dc_shen_caopi",
+			skills: {},
+		};
+	}
+}
+
 export const type = "extension";
 
 export default function () {
@@ -1072,6 +1181,14 @@ export default function () {
 			lib.suixiang_mou_kanpo_api = {
 				getCardList: getMouKanpoCardList,
 				consumeRecord: consumeMouKanpoRecord,
+			};
+			lib.suixiang_dc_keming_api = {
+				getStealableSkills,
+				getDamageTarget: getKemingDamageTarget,
+				getCharacterPool: getKemingCharacterPool,
+				getSurnameSkillOptions: getKemingSurnameSkillOptions,
+				getTargetSkillOptions: getKemingTargetSkillOptions,
+				getSkillChoiceDialog: getKemingSkillChoiceDialog,
 			};
 			lib.suixiang_mou_guanxing_api = {
 				guanxingTag: MOU_GUANXING_TAG,
@@ -1098,10 +1215,12 @@ export default function () {
 			setupSunquanCompat();
 			setupZhaoyunCompat();
 			setupMouZhugeliangCompat();
+			setupShenCaopiCompat();
 			lib.arenaReady.push(setupShenMachaoCompat);
 			lib.arenaReady.push(setupSunquanCompat);
 			lib.arenaReady.push(setupZhaoyunCompat);
 			lib.arenaReady.push(setupMouZhugeliangCompat);
+			lib.arenaReady.push(setupShenCaopiCompat);
 			lib.arenaReady.push(setupMouZhugeliangCardCompat);
 			lib.arenaReady.push(setupMouGuanxingPlayerTopCardsCompat);
 		},
@@ -1164,6 +1283,17 @@ export default function () {
 						img: "extension/随想录/image/character/suixiang-mou_zhugeliang.jpg",
 						dieAudios: ["ext:随想录/audio/die/suixiang-mou_zhugeliang.mp3"],
 					},
+					// 神曹丕：沿用新杀神曹丕的男/神/4体力设定与国战魏势力，添加〖阴鸷〗和〖刻名〗。
+					"suixiang-dc_shen_caopi": {
+						sex: "male",
+						group: "shen",
+						hp: 4,
+						maxHp: 4,
+						groupInGuozhan: "wei",
+						skills: ["suixiang_dc_yinzhi", "suixiang_dc_keming"],
+						names: "曹|丕",
+						img: "extension/随想录/image/character/suixiang-dc_shen_caopi.jpg",
+					},
 				},
 				translate: {
 					"suixiang-shi_xiaoqiao": "势 小乔",
@@ -1171,11 +1301,13 @@ export default function () {
 					"suixiang-mb_shen_machao": "神 马超",
 					"suixiang-dm_sunquan": "魔 孙权",
 					"suixiang-mou_zhugeliang": "谋 诸葛亮",
+					"suixiang-dc_shen_caopi": "神 曹丕",
 				},
 				characterTitle: {
 					"suixiang-shi_xiaoqiao": "衷音慰湟",
 					"suixiang-mb_shen_machao": "势震九天",
 					"suixiang-dm_sunquan": "隳堕的英谋",
+					"suixiang-dc_shen_caopi": "月晦书轮回",
 				},
 			},
 			skill: {
@@ -2881,6 +3013,368 @@ export default function () {
 							},
 						},
 					},
+					suixiang_dc_yinzhi: {
+						audio: "ext:随想录/audio/skill:2",
+						forced: true,
+						silent: true,
+						popup: false,
+						mark: true,
+						marktext: "鸷",
+						intro: {
+							content(_storage, player) {
+								const count = player.storage.suixiang_dc_yinzhi_count || 0;
+								return `阴鸷本局已发动${count}次，当前摸牌数为${Math.min(5, count)}。`;
+							},
+						},
+						init(player) {
+							player.storage.suixiang_dc_yinzhi_count ||= 0;
+							player.storage.suixiang_dc_yinzhi_roundPlayers ||= [];
+						},
+						onremove(player) {
+							removeYinzhiOwner(player);
+							delete player.storage.suixiang_dc_yinzhi_count;
+							delete player.storage.suixiang_dc_yinzhi_roundPlayers;
+						},
+						trigger: {
+							global: ["roundStart", "phaseBeforeStart", "useCardAfter", "respondAfter"],
+							player: "dieAfter",
+						},
+						filter(event, player, triggername) {
+							if (triggername === "roundStart" || triggername === "dieAfter") return true;
+							if (triggername === "phaseBeforeStart") {
+								return event.player && event.player !== player && player.storage.suixiang_dc_yinzhi_roundPlayers?.includes(event.player.playerid);
+							}
+							const target = event.player;
+							return (
+								player.isIn() &&
+								target &&
+								target !== player &&
+								player.storage.suixiang_dc_yinzhi_roundPlayers?.includes(target.playerid) &&
+								yinzhiUsedHandCard(event, target)
+							);
+						},
+						async content(event, trigger, player) {
+							switch (event.triggername) {
+								case "roundStart": {
+									const count = Math.min(5, (player.storage.suixiang_dc_yinzhi_count || 0) + 1);
+									player.storage.suixiang_dc_yinzhi_count = count;
+									player.syncStorage("suixiang_dc_yinzhi_count");
+									player.markSkill("suixiang_dc_yinzhi");
+									const targets = game.filterPlayer((current) => current !== player);
+									player.storage.suixiang_dc_yinzhi_roundPlayers = targets.map((target) => target.playerid);
+									player.syncStorage("suixiang_dc_yinzhi_roundPlayers");
+									for (const target of targets) {
+										target.addTempSkill(yinzhiBlockSkill, { player: ["phaseBeforeStart", "dieAfter"] });
+										const block = (target.storage[yinzhiBlockSkill] ||= { owners: [] });
+										if (!block.owners.includes(player.playerid)) block.owners.push(player.playerid);
+									}
+									player.logSkill("suixiang_dc_yinzhi");
+									await player.draw(count);
+									break;
+								}
+								case "phaseBeforeStart": {
+									const target = trigger.player;
+									target.addTempSkill(yinzhiTurnSkill, { player: ["phaseAfter", "dieAfter"] });
+									const turn = (target.storage[yinzhiTurnSkill] ||= { owners: [], cards: [] });
+									if (!turn.owners.includes(player.playerid)) turn.owners.push(player.playerid);
+									break;
+								}
+								case "useCardAfter":
+								case "respondAfter":
+									await player.draw(Math.min(5, player.storage.suixiang_dc_yinzhi_count || 0));
+									break;
+								case "dieAfter":
+									removeYinzhiOwner(player);
+									player.storage.suixiang_dc_yinzhi_roundPlayers = [];
+									player.syncStorage("suixiang_dc_yinzhi_roundPlayers");
+									break;
+							}
+						},
+						subSkill: {
+							block: {
+								charlotte: true,
+								persevereSkill: true,
+								mark: true,
+								marktext: "鸷",
+								intro: { content: "所有技能失效直到你的回合开始" },
+								init(player, skill) {
+									player.storage[skill] ||= { owners: [] };
+									player.addSkillBlocker(skill);
+								},
+								onremove(player, skill) {
+									player.removeSkillBlocker(skill);
+									delete player.storage[skill];
+								},
+								skillBlocker(skill) {
+									if (skill === yinzhiBlockSkill || skill === yinzhiTurnSkill) return false;
+									return !!lib.skill[skill];
+								},
+							},
+							turn: {
+								charlotte: true,
+								persevereSkill: true,
+								mark: true,
+								marktext: "鸷",
+								intro: { content: "本回合只能使用或打出本回合获得的牌" },
+								init(player, skill) {
+									player.storage[skill] ||= { owners: [], cards: [] };
+								},
+								onremove(player, skill) {
+									const storage = player.storage[skill];
+									if (storage?.cards?.length) player.removeGaintag(getYinzhiTurnTag(player), storage.cards);
+									delete player.storage[skill];
+								},
+								mod: {
+									cardEnabled(card, player) {
+										if (_status.currentPhase !== player) return;
+										const cards = getYinzhiCardMaterials(card);
+										if (cards.length && cards.some((item) => !item.hasGaintag(getYinzhiTurnTag(player)))) return false;
+									},
+									cardRespondable(card, player) {
+										if (_status.currentPhase !== player) return;
+										const cards = getYinzhiCardMaterials(card);
+										if (cards.length && cards.some((item) => !item.hasGaintag(getYinzhiTurnTag(player)))) return false;
+									},
+									cardSavable(card, player) {
+										if (_status.currentPhase !== player) return;
+										const cards = getYinzhiCardMaterials(card);
+										if (cards.length && cards.some((item) => !item.hasGaintag(getYinzhiTurnTag(player)))) return false;
+									},
+								},
+								trigger: {
+									global: ["gainBegin", "equipAfter", "addJudgeAfter", "addToExpansionAfter"],
+									source: "damageSource",
+								},
+								filter(event, player, triggername) {
+									const storage = player.storage[yinzhiTurnSkill];
+									if (!storage) return false;
+									if (triggername === "damageSource") {
+										return event.source === player && storage.owners?.includes(event.player?.playerid);
+									}
+									if (_status.currentPhase !== player || event.player !== player) return false;
+									if (triggername === "gainBegin") return !!event.cards?.some((card) => get.owner(card, "judge") !== player);
+									if (event.relatedLose?.player === player) return false;
+									const cards = event.cards || event.card?.cards || [];
+									const owned = player.getCards("hejsxj");
+									return cards.some((card) => owned.includes(card));
+								},
+								async content(event, trigger, player) {
+									const storage = player.storage[yinzhiTurnSkill];
+									const tag = getYinzhiTurnTag(player);
+									switch (event.triggername) {
+										case "gainBegin": {
+										const cards = (trigger.cards || []).filter((card) => get.owner(card, "judge") !== player);
+										if (cards.length) game.broadcastAll((cards2, tag2) => cards2.forEach((card) => card.addGaintag(tag2)), cards, tag);
+										for (const card of cards) {
+												if (!storage.cards.includes(card)) storage.cards.push(card);
+											}
+											break;
+										}
+										case "equipAfter":
+										case "addJudgeAfter":
+										case "addToExpansionAfter": {
+											const owned = player.getCards("hejsxj");
+											const cards = (trigger.cards || trigger.card?.cards || []).filter((card) => owned.includes(card));
+											if (cards.length) {
+												game.broadcastAll((cards2, tag2) => cards2.forEach((card) => card.addGaintag(tag2)), cards, tag);
+												for (const card of cards) {
+													if (!storage.cards.includes(card)) storage.cards.push(card);
+												}
+											}
+											break;
+										}
+										case "damageSource": {
+											const owner = game.playerMap[trigger.player.playerid] || lib.playerOL[trigger.player.playerid];
+											if (!owner?.isIn()) break;
+											const owned = player.getCards("hejsxj");
+											const cards = storage.cards.filter((card) => owned.includes(card));
+											if (cards.length) await owner.gain(cards, "gain2");
+											break;
+										}
+									}
+								},
+							},
+						},
+					},
+					suixiang_dc_keming: {
+						audio: "ext:随想录/audio/skill:2",
+						init(player) {
+							player.storage.suixiang_dc_keming_usedPlayers ||= [];
+						},
+						onremove(player) {
+							delete player.storage.suixiang_dc_keming_usedPlayers;
+						},
+						trigger: {
+							player: "damageEnd",
+							source: "damageSource",
+						},
+						filter(event, player, triggername) {
+							const target = lib.suixiang_dc_keming_api.getDamageTarget(event, triggername);
+							return !!target && target !== player && event.num > 0;
+						},
+						logTarget(event, _player, triggername) {
+							return lib.suixiang_dc_keming_api.getDamageTarget(event, triggername);
+						},
+						async cost(event, trigger, player) {
+							const api = lib.suixiang_dc_keming_api;
+							const target = api.getDamageTarget(trigger, event.triggername);
+							if (!target || target === player) {
+								event.result = { bool: false };
+								return;
+							}
+							const targetSkills = api.getStealableSkills(target);
+							const ownerSkills = new Set(player.getSkills("invisible", false, false));
+							const hasSameSkill = targetSkills.some((skill) => ownerSkills.has(skill));
+							const sameSurnamePool = hasSameSkill ? api.getCharacterPool(target, ownerSkills, "surname") : [];
+							const caoSurnamePool = hasSameSkill ? api.getCharacterPool(target, ownerSkills, "cao") : [];
+							if (!targetSkills.length || (hasSameSkill && !sameSurnamePool.length && !caoSurnamePool.length)) {
+								event.result = { bool: false };
+								return;
+							}
+							const result = await player
+								.chooseBool({
+									prompt: "是否发动【刻名】？",
+									prompt2: hasSameSkill
+										? `你已拥有${get.translation(target)}的技能，请选择从同姓武将或曹姓武将中获得一项技能。`
+										: `获得${get.translation(target)}的一项技能。`,
+									choice: true,
+								})
+								.set("ai", () => true)
+								.forResult();
+							if (!result?.bool) {
+								event.result = { bool: false };
+								return;
+							}
+							let options;
+							if (hasSameSkill) {
+								let pool = "surname";
+								const controls = [];
+								const sameAndCaoPoolEquivalent =
+									sameSurnamePool.length === caoSurnamePool.length &&
+									sameSurnamePool.every((name) => caoSurnamePool.includes(name));
+								if (sameSurnamePool.length) controls.push("同姓武将技能");
+								if (caoSurnamePool.length && !sameAndCaoPoolEquivalent) controls.push("曹姓武将技能");
+								if (controls.length > 1) {
+									const source = await player
+										.chooseControl({
+											controls,
+											prompt: "刻名：选择获得技能的武将范围",
+											choice: 0,
+										})
+										.set("ai", () => controls[0])
+										.forResult();
+									pool = source?.control === "曹姓武将技能" ? "cao" : "surname";
+								} else if (controls[0] === "曹姓武将技能") {
+									pool = "cao";
+								}
+								options = api.getSurnameSkillOptions(target, ownerSkills, pool);
+							} else {
+								options = api.getTargetSkillOptions(target, targetSkills);
+							}
+							if (!options.length) {
+								event.result = { bool: false };
+								return;
+							}
+							const choice = await player
+								.chooseButton(api.getSkillChoiceDialog("刻名：选择获得一项技能", options))
+								.set("forced", true)
+								.set("ai", (button) => get.skillRank(button.link, "inout"))
+								.forResult();
+							event.result = {
+								bool: !!choice?.bool && !!choice.links?.length,
+								cost_data: choice?.links?.[0],
+							};
+						},
+						async content(event, _trigger, player) {
+							const skill = event.cost_data;
+							if (!skill || !lib.skill[skill]) return;
+							await player.addAdditionalSkills("suixiang_dc_keming", [skill], true);
+						},
+						// “每回合每名角色限一次”只限制 watch 替换分支，不限制伤害后的技能获得。
+						group: ["suixiang_dc_keming_watch", "suixiang_dc_keming_reset"],
+						subSkill: {
+							watch: {
+								charlotte: true,
+								audio: "suixiang_dc_keming",
+								trigger: { global: ["useSkillAfter", "logSkill"] },
+								filter(event, player) {
+									if (event.type !== "player" || !event.player || event.player === player) return false;
+									const skill = get.sourceSkillFor(event);
+									return (
+										!!skill &&
+										player.getSkills("invisible", false, false).includes(skill) &&
+											event.player.getSkills("invisible", false, false).includes(skill) &&
+										!player.storage.suixiang_dc_keming_usedPlayers?.includes(event.player.playerid)
+									);
+								},
+								async cost(event, trigger, player) {
+									const api = lib.suixiang_dc_keming_api;
+									const target = trigger.player;
+									const skill = get.sourceSkillFor(trigger);
+									if (!target || target === player || !skill) {
+										event.result = { bool: false };
+										return;
+									}
+									const excluded = new Set([...target.getSkills("invisible", false, false), skill]);
+									const options = api.getSurnameSkillOptions(target, excluded);
+									if (!options.length) {
+										event.result = { bool: false };
+										return;
+									}
+									const result = await player
+										.chooseBool({
+											prompt: "是否发动【刻名】？",
+											prompt2: `将${get.translation(skill)}替换为随机三名同姓武将中的一项技能。`,
+											choice: true,
+										})
+										.set("ai", () => get.attitude(player, target) < 0)
+										.forResult();
+									if (!result?.bool) {
+										event.result = { bool: false };
+										return;
+									}
+									const choice = await player
+										.chooseButton(api.getSkillChoiceDialog(`刻名：选择替换${get.translation(skill)}的技能`, options))
+										.set("forced", true)
+										.set("ai", (button) => get.skillRank(button.link, "inout"))
+										.forResult();
+									event.result = {
+										bool: !!choice?.bool && !!choice.links?.length,
+										cost_data: choice?.links?.[0],
+									};
+								},
+								async content(event, trigger, player) {
+									const target = trigger.player;
+									const skill = get.sourceSkillFor(trigger);
+									const replacement = event.cost_data;
+									if (!target || !skill || !replacement || replacement === skill || !lib.skill[replacement]) return;
+									const usedPlayers = (player.storage.suixiang_dc_keming_usedPlayers ||= []);
+									if (
+										usedPlayers.includes(target.playerid) ||
+										!target.getSkills("invisible", false, false).includes(skill) ||
+										target.getSkills("invisible", false, false).includes(replacement)
+									) {
+										return;
+									}
+									usedPlayers.push(target.playerid);
+									player.syncStorage("suixiang_dc_keming_usedPlayers");
+									await target.changeSkills([replacement], [skill]);
+								},
+							},
+							reset: {
+								charlotte: true,
+								forced: true,
+								silent: true,
+								popup: false,
+								priority: 1000,
+								trigger: { global: "phaseBefore" },
+								content(event, trigger, player) {
+									player.storage.suixiang_dc_keming_usedPlayers = [];
+									player.syncStorage("suixiang_dc_keming_usedPlayers");
+								},
+							},
+						},
+					},
 					suixiang_wuyi_block: {
 						charlotte: true,
 						persevereSkill: true,
@@ -2998,6 +3492,20 @@ export default function () {
 					},
 				},
 				translate: {
+					suixiang_dc_yinzhi: "阴鸷",
+					suixiang_dc_yinzhi_info:
+						"每轮开始时，所有其他角色技能失效直到其回合开始时，你摸X张牌，这些角色每次使用或打出手牌后你摸X张牌（X为阴鸷本局游戏发动的次数，至多为5）。然后其回合内只能使用或打出本回合获得的牌，若其对你造成伤害，你获得其本回合获得的牌。",
+					suixiang_dc_yinzhi_block: "阴鸷·封技",
+					suixiang_dc_yinzhi_turn: "阴鸷·限牌",
+					"#ext:随想录/audio/skill/suixiang_dc_yinzhi1": "大袖蔽天穹，日月一息起，逆我者，永堕无明！",
+					"#ext:随想录/audio/skill/suixiang_dc_yinzhi2": "枯骨九重阶，血墨万卷诏，孤不怿以天为父！",
+					suixiang_dc_keming: "刻名",
+					suixiang_dc_keming_info:
+						"当你受到其他角色造成的伤害或对其他角色造成伤害后，你可以获得该角色身上一个技能，若你已拥有与目标同名技能，改为从三个与其同姓武将中选一个技能获得。每回合每名角色限一次，若其他角色发动了你拥有的技能，则你可以从随机三名其同姓武将中选一个技能替换其对应技能。",
+					suixiang_dc_keming_watch: "刻名",
+					suixiang_dc_keming_reset: "刻名",
+					"#ext:随想录/audio/skill/suixiang_dc_keming1": "冠我名于九州，始知天下多好臣！",
+					"#ext:随想录/audio/skill/suixiang_dc_keming2": "我言成诏，汝名成囚！",
 					suixiang_mou_huoji: "火计",
 					suixiang_mou_huoji_info:
 						"使命技，出牌阶段限一次，你可以选择一名其他角色，对其与其势力相同的其他角色各造成1点火焰伤害。若其中有角色因此进入濒死，你可以再次发动本技能；每回合第X次额外发动造成的伤害增加X点（X为本回合本技能额外发动的次数），限本次出牌阶段内链式追加。成功：准备阶段，若有角色曾因火焰伤害进入过濒死，你失去〖火计〗，获得〖观星〗和〖空城〗。失败：成功前你进入濒死时，你将体力回复至上限，然后使命失败。",
