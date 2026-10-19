@@ -36,6 +36,248 @@ function getCuifengUnlocks(player) {
 	const unlocks = player.getStorage("suixiang_cuifeng_unlocked");
 	return Array.isArray(unlocks) ? unlocks : [];
 }
+function getMouKanpoCardList(excludeName) {
+	const seen = new Set();
+	return get.inpileVCardList(info => info[2] !== "sha" || !info[3]).filter(info => {
+		const name = info[2];
+		if (!name || name === excludeName || seen.has(name)) return false;
+		seen.add(name);
+		return true;
+	});
+}
+function consumeMouKanpoRecord(records, name) {
+	const index = records.indexOf(name);
+	if (index < 0) return false;
+	records.splice(index, 1);
+	return true;
+}
+function setMouHuojiFlag(player, name, value) {
+	player.storage[name] = value;
+	game.broadcastAll((current, key, nextValue) => {
+		current.storage[key] = nextValue;
+	}, player, name, value);
+}
+function getMouHuojiDamageEvent(event) {
+	if (event?.reason?.name === "damage") return event.reason;
+	if (event?.parent?.name === "damage") return event.parent;
+	return event?.getParent?.("damage", true) || null;
+}
+const MOU_GUANXING_TAG = "suixiang_mou_guanxing";
+const MOU_XING_TAG = "suixiang_mou_xing";
+function isMouGuanxingCard(card) {
+	// 观星牌始终保留牌堆取出的实体牌；这里仅读取引擎判定时附带的实体牌引用，
+	// 不调用视为牌/复制牌接口，也不改写 card 本身。
+	return (
+		card?.hasGaintag?.(MOU_GUANXING_TAG) ||
+		(Array.isArray(card?.cards) && card.cards.some(cardx => cardx?.hasGaintag?.(MOU_GUANXING_TAG)))
+	);
+}
+function getMouGuanxingCards(player) {
+	const state = lib.suixiang_mou_guanxing_api?.deckState;
+	if (state?.owner === player) {
+		const visible = player.getCards("s", card => card.hasGaintag(MOU_GUANXING_TAG));
+		return state.cards.filter(card => visible.includes(card)).concat(visible.filter(card => !state.cards.includes(card)));
+	}
+	return player.getCards("s", card => card.hasGaintag(MOU_GUANXING_TAG));
+}
+function isMouXingCard(card) {
+	return card?.hasGaintag?.(MOU_XING_TAG) || (Array.isArray(card?.cards) && card.cards.some(cardx => cardx?.hasGaintag?.(MOU_XING_TAG)));
+}
+function getMouXingCards(player) {
+	return [...player.getCards("s", card => card.hasGaintag(MOU_XING_TAG)), ...player.getCards("x", card => card.hasGaintag(MOU_XING_TAG))];
+}
+function getMouGuanxingUsableCards(player) {
+	return [...getMouGuanxingCards(player), ...getMouXingCards(player)];
+}
+function setupMouZhugeliangCardCompat() {
+	const zhangba = lib.skill?.zhangba_skill;
+	if (zhangba && !zhangba._suixiangMouXingCompat) {
+		const originalFilterCard = zhangba.filterCard;
+		zhangba.position = "hs";
+		zhangba.filterCard = function (card, player, ...args) {
+			if (player?.getCards("s").includes(card) && !isMouXingCard(card) && !isMouGuanxingCard(card)) return false;
+			if (player?.getCards("x").includes(card) && !isMouXingCard(card)) return false;
+			if (typeof originalFilterCard === "function") return originalFilterCard.call(this, card, player, ...args);
+			return originalFilterCard !== false;
+		};
+		zhangba.filter = function (event, player) {
+			const expansionStars = getMouXingCards(player).filter(card => player.getCards("x").includes(card)).length;
+			return player.countCards("hs") + expansionStars >= 2;
+		};
+		zhangba._suixiangMouXingCompat = true;
+	}
+	const guanshi = lib.skill?.guanshi_skill;
+	if (guanshi && !guanshi._suixiangMouXingCompat) {
+		guanshi.filter = function (event, player) {
+			if (event.type !== "card" || event.card.name !== "sha" || !event.target?.isIn()) return false;
+			let min = 2;
+			if (!player.hasSkill("guanshi_skill", null, false)) {
+				min += player.hasCards("e", card => get.name(card) === "guanshi") ? 1 : 0;
+			}
+			return player.countCards("he") + getMouGuanxingUsableCards(player).length >= min;
+		};
+		guanshi._suixiangMouXingCompat = true;
+	}
+}
+function extendMouUsePosition(event, player) {
+	const availableCards = getMouGuanxingUsableCards(player);
+	if (!availableCards.length || typeof event.position !== "string" || !event.position.includes("h")) return;
+	for (const [position, cards] of [["s", availableCards], ["x", player.getCards("x", card => card.hasGaintag(MOU_XING_TAG))]]) {
+		if (cards.length && !event.position.includes(position)) {
+			event.position += position;
+		}
+	}
+	const allowedCards = new Set(availableCards);
+	const specialCards = new Set([...player.getCards("s"), ...player.getCards("x")]);
+	const originalFilter = typeof event.filterCard === "function" ? event.filterCard : lib.filter.all;
+	event.filterCard = function (card, currentPlayer, ...args) {
+		if (currentPlayer === player) {
+			const cards = Array.isArray(card?.cards) ? card.cards : [card];
+			const selectedSpecialCards = cards.filter(cardx => specialCards.has(cardx));
+			if (selectedSpecialCards.some(cardx => !allowedCards.has(cardx))) {
+				return false;
+			}
+		}
+		return originalFilter.call(this, card, currentPlayer, ...args);
+	};
+}
+function isMouGuanxingDiscardEvent(event) {
+	const huogong = event.getParent?.(current => current.name === "huogong" || current.card?.name === "huogong", true, true);
+	const position = typeof event.position === "string" ? event.position : "h";
+	const isHuogong = Boolean(huogong && position.includes("h"));
+	const isGuanshi = event.logSkill === "guanshi_skill" && position.includes("h") && position.includes("e");
+	return isHuogong || isGuanshi;
+}
+function extendMouDiscardPosition(event, player) {
+	const isGuanshi = event.logSkill === "guanshi_skill";
+	const allowedCards = isGuanshi
+		? new Set([...player.getCards("he"), ...getMouGuanxingUsableCards(player)])
+		: new Set([...player.getCards("h"), ...getMouGuanxingUsableCards(player)]);
+	if (!event.position.includes("s")) event.position += "s";
+	if (!event.position.includes("x")) event.position += "x";
+	const originalFilter = typeof event.filterCard === "function" ? event.filterCard : lib.filter.cardDiscardable;
+	event.filterCard = function (card, currentPlayer, ...args) {
+		if (currentPlayer === player && !allowedCards.has(card)) return false;
+		return originalFilter.call(this, card, currentPlayer, ...args);
+	};
+}
+async function fillMouGuanxingCards(player) {
+	if (!player?.hasSkill?.("suixiang_mou_guanxing")) return;
+	const state = lib.suixiang_mou_guanxing_api.deckState;
+	if (state.owner && state.owner !== player) return;
+	state.owner = player;
+	const current = getMouGuanxingCards(player);
+	const need = Math.max(0, 7 - current.length);
+	if (need) {
+		const cards = state.drawPhysicalCards ? state.drawPhysicalCards(need) : get.cards(need);
+		if (cards.length) {
+			player.directgains(cards, undefined, MOU_GUANXING_TAG);
+			state.cards.push(...cards);
+		}
+	}
+	state.ready = true;
+	if (getMouGuanxingCards(player).length) player.markSkill("suixiang_mou_guanxing");
+}
+async function arrangeMouGuanxingCards(player) {
+	const cards = getMouGuanxingCards(player);
+	if (!cards.length) return;
+	const result = await player
+		.chooseToMove({
+			prompt: "观星：调整牌堆顶七张牌的顺序，可将任意张牌置于牌堆底",
+			list: [["牌堆顶（左为顶）", cards], ["牌堆底（左为底）"]],
+		})
+		.forResult();
+	if (!result?.bool || !Array.isArray(result.moved)) return;
+	const topCards = Array.isArray(result.moved[0]) ? result.moved[0].slice() : [];
+	const bottomCards = Array.isArray(result.moved[1]) ? result.moved[1].slice() : [];
+	player._suixiang_mou_guanxing_arranging = true;
+	try {
+		const state = lib.suixiang_mou_guanxing_api.deckState;
+		state.cards = topCards.slice();
+		if (bottomCards.length) {
+			const moveBottom = player.loseToDiscardpile({
+				cards: bottomCards,
+				position: ui.cardPile,
+				log: false,
+				animate: false,
+			});
+			moveBottom.log = false;
+			moveBottom.animate = false;
+			await moveBottom;
+			for (const card of bottomCards) card.removeGaintag?.(MOU_GUANXING_TAG);
+		}
+	} finally {
+		delete player._suixiang_mou_guanxing_arranging;
+	}
+	await fillMouGuanxingCards(player);
+}
+function removeMouGuanxingCards(player, cards) {
+	const state = lib.suixiang_mou_guanxing_api?.deckState;
+	if (state?.owner !== player || !Array.isArray(cards) || !cards.length) return;
+	const removed = new Set(cards);
+	state.cards = state.cards.filter(card => !removed.has(card));
+}
+function takeMouGuanxingTopCards(num, putBack, drawRemaining) {
+	const state = lib.suixiang_mou_guanxing_api?.deckState;
+	if (!state?.ready || !state.owner || !state.owner.hasSkill?.("suixiang_mou_guanxing") || typeof num === "number" && num <= 0) {
+		return drawRemaining(num, putBack);
+	}
+	const count = typeof num === "number" ? Math.ceil(num) : 1;
+	const visible = state.cards.splice(0, Math.min(count, state.cards.length));
+	for (const card of visible) {
+		card.remove();
+		card.original = "c";
+		card.classList?.remove("glows");
+		card.classList?.remove("drawinghidden");
+		if (!putBack) card.removeGaintag?.(MOU_GUANXING_TAG);
+	}
+	const remaining = count - visible.length;
+	const fromPile = remaining > 0 ? drawRemaining(remaining, putBack) : [];
+	if (putBack) {
+		state.cards.unshift(...visible);
+		if (visible.length && state.owner) state.owner.directgains(visible, undefined, MOU_GUANXING_TAG);
+	} else if (state.owner.hasSkill?.("suixiang_mou_guanxing") && state.cards.length < 7) {
+		const refill = state.drawPhysicalCards ? state.drawPhysicalCards(7 - state.cards.length) : [];
+		if (refill.length) {
+			state.owner.directgains(refill, undefined, MOU_GUANXING_TAG);
+			state.cards.push(...refill);
+		}
+	}
+	return visible.concat(fromPile);
+}
+function setupMouGuanxingPlayerTopCardsCompat() {
+	// 摸牌、判定等流程在部分模式中优先调用 Player#getTopCards，需和 get.cards 共用同一逻辑牌堆顶。
+	const prototype = lib.element?.Player?.prototype;
+	const targets = [prototype, ...(game.players || []), ...(game.dead || [])].filter(Boolean);
+	for (const target of targets) {
+		if (target.getTopCards?._suixiangMouGuanxingCompat) continue;
+		const originalGetTopCards = target.getTopCards;
+		const wrapped = function (num, ...args) {
+			return takeMouGuanxingTopCards(num, false, (count, putBack) => {
+				if (typeof originalGetTopCards === "function") return originalGetTopCards.call(this, count, ...args);
+				return get._suixiangMouGuanxingDeckCompat(count, putBack);
+			});
+		};
+		wrapped._suixiangMouGuanxingCompat = true;
+		target.getTopCards = wrapped;
+	}
+}
+function setupMouGuanxingDeckCompat() {
+	const state = lib.suixiang_mou_guanxing_api?.deckState;
+	if (get._suixiangMouGuanxingDeckCompat) {
+		if (state && !state.drawPhysicalCards) state.drawPhysicalCards = get._suixiangMouGuanxingDeckCompat;
+		setupMouGuanxingPlayerTopCardsCompat();
+		return;
+	}
+	const originalGetCards = get.cards;
+	if (typeof originalGetCards !== "function") return;
+	if (state) state.drawPhysicalCards = originalGetCards.bind(get);
+	get.cards = function (num, putBack) {
+		return takeMouGuanxingTopCards(num, putBack, (count, shouldPutBack) => originalGetCards.call(this, count, shouldPutBack));
+	};
+	get._suixiangMouGuanxingDeckCompat = originalGetCards.bind(get);
+	setupMouGuanxingPlayerTopCardsCompat();
+}
 function refreshCuifengUnlocks(player, force = false) {
 	if (!force && !hasWuyiSkill(player)) return getCuifengUnlocks(player);
 	const additions = ["unrecorded"];
@@ -796,19 +1038,72 @@ function setupZhaoyunCompat() {
 	}
 }
 
+// 谋诸葛亮：共享原版诸葛亮的十周年动皮和千幻聆音皮肤库。
+// 看破语音与千幻聆音皮肤映射到原版 sp_zhugeliang 的看破语音组。
+function setupMouZhugeliangCompat() {
+	if (window.decadeUI?.dynamicSkin) {
+		const source =
+			window.decadeUI.dynamicSkin.zhugeliang ||
+			window.decadeUI.dynamicSkin.sp_zhugeliang ||
+			window.decadeUI.dynamicSkin.sb_sp_zhugeliang;
+		if (source && !window.decadeUI.dynamicSkin["suixiang-mou_zhugeliang"]) {
+			window.decadeUI.dynamicSkin["suixiang-mou_zhugeliang"] = source;
+		}
+	}
+	if (lib.qhly_skinShare) {
+		const share = lib.qhly_skinShare["suixiang-mou_zhugeliang"] || {};
+		share.name ||= "sp_zhugeliang";
+		share.skills ||= {};
+		share.skills.suixiang_mou_kanpo ||= "kanpo";
+		lib.qhly_skinShare["suixiang-mou_zhugeliang"] = share;
+	}
+}
+
 export const type = "extension";
 
 export default function () {
 	return {
 		name: "随想录",
 		content(config, pack) {
+			// 技能内容会由 StepCompiler 重新编译，无法捕获扩展文件顶层的闭包函数。
+			// 将被编译内容调用的工具函数挂到 lib 上，确保编译后的技能仍可访问。
+			lib.suixiang_mou_huoji_setFlag = setMouHuojiFlag;
+			lib.suixiang_mou_huoji_getDamageEvent = getMouHuojiDamageEvent;
+			lib.suixiang_mou_kanpo_api = {
+				getCardList: getMouKanpoCardList,
+				consumeRecord: consumeMouKanpoRecord,
+			};
+			lib.suixiang_mou_guanxing_api = {
+				guanxingTag: MOU_GUANXING_TAG,
+				xingTag: MOU_XING_TAG,
+				isGuanxingCard: isMouGuanxingCard,
+				getGuanxingCards: getMouGuanxingCards,
+				isXingCard: isMouXingCard,
+				getXingCards: getMouXingCards,
+				getUsableCards: getMouGuanxingUsableCards,
+				isDiscardEvent: isMouGuanxingDiscardEvent,
+				extendUsePosition: extendMouUsePosition,
+				extendDiscardPosition: extendMouDiscardPosition,
+				fillCards: fillMouGuanxingCards,
+				arrangeCards: arrangeMouGuanxingCards,
+				removeCards: removeMouGuanxingCards,
+				deckState: { owner: null, cards: [], ready: false },
+			};
+			lib.translate[MOU_GUANXING_TAG] = "观星";
+			lib.translate[MOU_XING_TAG] = "星";
+			setupMouGuanxingDeckCompat();
+			setupMouZhugeliangCardCompat();
 			// 立即尝试（美化扩展已加载时生效），并在游戏就绪后兜底（美化扩展后加载时生效）
 			setupShenMachaoCompat();
 			setupSunquanCompat();
 			setupZhaoyunCompat();
+			setupMouZhugeliangCompat();
 			lib.arenaReady.push(setupShenMachaoCompat);
 			lib.arenaReady.push(setupSunquanCompat);
 			lib.arenaReady.push(setupZhaoyunCompat);
+			lib.arenaReady.push(setupMouZhugeliangCompat);
+			lib.arenaReady.push(setupMouZhugeliangCardCompat);
+			lib.arenaReady.push(setupMouGuanxingPlayerTopCardsCompat);
 		},
 		package: {
 			character: {
@@ -857,12 +1152,25 @@ export default function () {
 						img: "extension/随想录/image/character/suixiang-dm_sunquan.jpg",
 						dieAudios: ["ext:随想录/audio/die/suixiang-dm_sunquan.mp3"],
 					},
+					// 谋诸葛亮：沿用本体 sb_sp_zhugeliang 的男/蜀/3 设定，接入看破、火计及其衍生技。
+					"suixiang-mou_zhugeliang": {
+						sex: "male",
+						group: "shu",
+						hp: 3,
+						maxHp: 3,
+						skills: ["suixiang_mou_kanpo", "suixiang_mou_huoji"],
+						names: "诸葛|亮",
+						clans: ["琅琊诸葛氏"],
+						img: "extension/随想录/image/character/suixiang-mou_zhugeliang.jpg",
+						dieAudios: ["ext:随想录/audio/die/suixiang-mou_zhugeliang.mp3"],
+					},
 				},
 				translate: {
 					"suixiang-shi_xiaoqiao": "势 小乔",
 					"suixiang-shi_zhaoyun": "势 赵云",
 					"suixiang-mb_shen_machao": "神 马超",
 					"suixiang-dm_sunquan": "魔 孙权",
+					"suixiang-mou_zhugeliang": "谋 诸葛亮",
 				},
 				characterTitle: {
 					"suixiang-shi_xiaoqiao": "衷音慰湟",
@@ -872,6 +1180,561 @@ export default function () {
 			},
 			skill: {
 				skill: {
+					// ========== 火计（使命技） ==========
+					suixiang_mou_huoji: {
+						audio: "ext:随想录/audio/skill:3",
+						dutySkill: true,
+						onremove(player) {
+							for (const name of [
+								"suixiang_mou_huoji_used",
+								"suixiang_mou_huoji_extra",
+								"suixiang_mou_huoji_extra_used",
+							]) {
+								lib.suixiang_mou_huoji_setFlag(player, name, 0);
+							}
+						},
+						derivation: ["suixiang_mou_guanxing", "suixiang_mou_kongcheng"],
+						group: [
+							"suixiang_mou_huoji_fire",
+							"suixiang_mou_huoji_track",
+							"suixiang_mou_huoji_achieve",
+							"suixiang_mou_huoji_fail",
+							"suixiang_mou_huoji_phase_begin",
+							"suixiang_mou_huoji_phase_after",
+						],
+						subSkill: {
+							fire: {
+								audio: "ext:随想录/audio/skill/suixiang_mou_huoji1.mp3",
+								enable: "phaseUse",
+								filter(event, player) {
+									if (player.storage.suixiang_mou_huoji_failed) return false;
+									const used = Number(player.storage.suixiang_mou_huoji_used) || 0;
+									const extra = Number(player.storage.suixiang_mou_huoji_extra) || 0;
+									return used === 0 || extra > 0;
+								},
+								filterTarget: (card, player, target) => target !== player,
+								selectTarget: 1,
+								prompt(event, player) {
+									const extra = Number(player.storage.suixiang_mou_huoji_extra) || 0;
+									const extraCount = Number(player.storage.suixiang_mou_huoji_extra_used) || 0;
+									return extra > 0
+										? `火计：选择一名其他角色，对其与其势力相同的其他角色各造成${2 + extraCount}点火焰伤害（剩余额外发动${extra}次）`
+										: "选择一名其他角色，对其与其势力相同的其他角色各造成1点火焰伤害";
+								},
+								line: "fire",
+								async content(event, trigger, player) {
+									const used = Number(player.storage.suixiang_mou_huoji_used) || 0;
+									let extra = Number(player.storage.suixiang_mou_huoji_extra) || 0;
+									let extraCount = Number(player.storage.suixiang_mou_huoji_extra_used) || 0;
+									const isExtra = used > 0;
+									if (isExtra) {
+										if (extra <= 0) return;
+										extra--;
+										extraCount++;
+									}
+									lib.suixiang_mou_huoji_setFlag(player, "suixiang_mou_huoji_used", used + 1);
+									lib.suixiang_mou_huoji_setFlag(player, "suixiang_mou_huoji_extra", extra);
+									lib.suixiang_mou_huoji_setFlag(player, "suixiang_mou_huoji_extra_used", extraCount);
+									const target = event.targets?.[0] ?? event.target;
+									if (!target || target === player || !target.isIn() || !player.isIn()) return;
+
+									const batch = { player };
+									const targets = game.filterPlayer(current => current !== player && current.group === target.group);
+									player.line(targets, "fire");
+									if (targets.length) await game.delayx();
+									for (const current of targets) {
+										if (!current.isIn()) continue;
+										const damage = current.damage({ source: player, num: 1 + extraCount, nature: "fire" });
+										if (damage) damage.suixiang_mou_huoji_batch = batch;
+										await damage;
+									}
+								},
+								ai: {
+									order: 7,
+									fireAttack: true,
+									result: {
+										target(player, target) {
+											return game
+												.filterPlayer(current => current !== player && current.group === target.group)
+												.reduce((sum, current) => sum + get.damageEffect(current, player, player, "fire"), 0);
+										},
+									},
+								},
+							},
+							track: {
+								charlotte: true,
+								trigger: { global: "dying" },
+								forced: true,
+								popup: false,
+								filter(event) {
+									const damage = lib.suixiang_mou_huoji_getDamageEvent(event);
+									return !!damage?.hasNature?.("fire");
+								},
+								async content(event, trigger, player) {
+									lib.suixiang_mou_huoji_setFlag(player, "suixiang_mou_huoji_fire_dying", true);
+									const damage = lib.suixiang_mou_huoji_getDamageEvent(trigger);
+									const batch = damage?.suixiang_mou_huoji_batch;
+									if (!batch || batch.player !== player || !player.isIn()) return;
+									if (batch.suixiang_mou_huoji_extra_granted) return;
+									batch.suixiang_mou_huoji_extra_granted = true;
+									const extra = Number(player.storage.suixiang_mou_huoji_extra) || 0;
+									lib.suixiang_mou_huoji_setFlag(player, "suixiang_mou_huoji_extra", extra + 1);
+								},
+							},
+							achieve: {
+								audio: "ext:随想录/audio/skill/suixiang_mou_huoji2.mp3",
+								trigger: { player: "phaseZhunbeiBegin" },
+								forced: true,
+								locked: false,
+								filter(event, player) {
+									return player.storage.suixiang_mou_huoji_fire_dying === true;
+								},
+								async content(event, trigger, player) {
+									player.awakenSkill("suixiang_mou_huoji");
+									await player.changeSkills(["suixiang_mou_guanxing", "suixiang_mou_kongcheng"], ["suixiang_mou_huoji"]);
+									await lib.suixiang_mou_guanxing_api.fillCards(player);
+									game.log(player, "成功完成使命");
+								},
+							},
+							fail: {
+								audio: "ext:随想录/audio/skill/suixiang_mou_huoji3.mp3",
+								trigger: { player: "dying" },
+								forced: true,
+								locked: false,
+								async content(event, trigger, player) {
+									lib.suixiang_mou_huoji_setFlag(player, "suixiang_mou_huoji_failed", true);
+									await player.recoverTo(player.maxHp);
+									player.awakenSkill("suixiang_mou_huoji");
+									game.log(player, "使命失败");
+								},
+							},
+							phase_begin: {
+								trigger: { player: "phaseUseBegin" },
+								forced: true,
+								silent: true,
+								charlotte: true,
+								content(event, trigger, player) {
+									for (const name of [
+										"suixiang_mou_huoji_used",
+										"suixiang_mou_huoji_extra",
+										"suixiang_mou_huoji_extra_used",
+									]) {
+										lib.suixiang_mou_huoji_setFlag(player, name, 0);
+									}
+								},
+							},
+							phase_after: {
+								trigger: { player: "phaseUseAfter" },
+								forced: true,
+								silent: true,
+								charlotte: true,
+								content(event, trigger, player) {
+									for (const name of [
+										"suixiang_mou_huoji_used",
+										"suixiang_mou_huoji_extra",
+										"suixiang_mou_huoji_extra_used",
+									]) {
+										lib.suixiang_mou_huoji_setFlag(player, name, 0);
+									}
+								},
+							},
+						},
+					},
+					suixiang_mou_guanxing: {
+						audio: "ext:随想录/audio/skill:2",
+						trigger: { player: "enterGame", global: "phaseZhunbeiBegin" },
+						forced: true,
+						locked: true,
+						mark: true,
+						marktext: "星",
+						onremove(player) {
+							const topCards = lib.suixiang_mou_guanxing_api.getGuanxingCards(player);
+							const stars = lib.suixiang_mou_guanxing_api.getXingCards(player);
+							const state = lib.suixiang_mou_guanxing_api.deckState;
+							state.cards = [];
+							state.ready = false;
+							if (state.owner === player) state.owner = null;
+							for (const card of topCards) card.removeGaintag?.(lib.suixiang_mou_guanxing_api.guanxingTag);
+							if (topCards.length) game.cardsGotoPile(topCards.slice().reverse(), "insert");
+							if (stars.length) player.loseToDiscardpile({ cards: stars, position: ui.discardPile, log: false, animate: false });
+						},
+						async content(event, trigger, player) {
+							await lib.suixiang_mou_guanxing_api.fillCards(player);
+							if (trigger.name === "phaseZhunbei") {
+								await lib.suixiang_mou_guanxing_api.arrangeCards(player);
+							}
+						},
+						group: ["suixiang_mou_guanxing_replenish", "suixiang_mou_guanxing_hand", "suixiang_mou_guanxing_cards", "suixiang_mou_guanxing_star"],
+						subSkill: {
+							replenish: {
+								charlotte: true,
+								trigger: { player: "loseAfter" },
+								forced: true,
+								silent: true,
+								filter(event, player) {
+									if (player._suixiang_mou_guanxing_arranging || !event.ss?.length) return false;
+									const lost = event.getl?.(player) || event;
+									const tagMap = lost.gaintag_map || {};
+									return (lost.ss || []).some(card => tagMap[card.cardid]?.includes(lib.suixiang_mou_guanxing_api.guanxingTag) || card.hasGaintag?.(lib.suixiang_mou_guanxing_api.guanxingTag));
+								},
+								async content(event, trigger, player) {
+									const lost = trigger.getl?.(player) || trigger;
+									const tagMap = lost.gaintag_map || {};
+									const cards = (lost.ss || []).filter(card => tagMap[card.cardid]?.includes(lib.suixiang_mou_guanxing_api.guanxingTag) || card.hasGaintag?.(lib.suixiang_mou_guanxing_api.guanxingTag));
+									lib.suixiang_mou_guanxing_api.removeCards(player, cards);
+									await lib.suixiang_mou_guanxing_api.fillCards(player);
+								},
+							},
+							hand: {
+								charlotte: true,
+								trigger: { player: ["enterGame", "gainAfter"] },
+								forced: true,
+								silent: true,
+								filter(event, player) {
+									return player.countCards("h") > 0;
+								},
+								async content(event, trigger, player) {
+									const cards = player.getCards("h");
+									if (!cards.length) return;
+									await player.discard(cards);
+								},
+							},
+							cards: {
+								charlotte: true,
+								forced: true,
+								silent: true,
+								trigger: { player: ["chooseToUseBegin", "chooseToRespondBegin", "chooseToDiscardBegin"] },
+								filter(event, player) {
+									if (event.name === "chooseToUse" || event.name === "chooseToRespond") {
+										return lib.suixiang_mou_guanxing_api.getUsableCards(player).length > 0 && String(event.position || "hs").includes("h");
+									}
+									return lib.suixiang_mou_guanxing_api.getUsableCards(player).length > 0 && lib.suixiang_mou_guanxing_api.isDiscardEvent(event);
+								},
+								content(event, trigger, player) {
+									if (trigger.name === "chooseToUse" || trigger.name === "chooseToRespond") {
+										lib.suixiang_mou_guanxing_api.extendUsePosition(trigger, player);
+									} else {
+										lib.suixiang_mou_guanxing_api.extendDiscardPosition(trigger, player);
+									}
+								},
+							},
+							star: {
+								charlotte: true,
+								forced: true,
+								silent: true,
+								firstDo: true,
+								trigger: { player: "loseAfter" },
+								filter(event, player) {
+									if (event.type !== "discard" || event.position !== ui.discardPile) return false;
+									const lost = event.getl?.(player) || event;
+									return (lost.hs || []).some(card => card.parentNode === ui.discardPile);
+								},
+								async content(event, trigger, player) {
+									const lost = trigger.getl?.(player) || trigger;
+									const cards = (lost.hs || []).filter(card => card.parentNode === ui.discardPile);
+									if (!cards.length) return;
+					for (const card of cards) {
+						card.removeGaintag?.(lib.suixiang_mou_guanxing_api.guanxingTag);
+						card.removeGaintag?.(lib.suixiang_mou_guanxing_api.xingTag);
+					}
+									player.directgains(cards, undefined, lib.suixiang_mou_guanxing_api.xingTag);
+									player.markSkill("suixiang_mou_guanxing");
+									game.log(player, "将", cards, "置为", "#y星");
+								},
+							},
+						},
+						intro: {
+							markcount(storage, player) {
+								return lib.suixiang_mou_guanxing_api.getXingCards(player).length;
+							},
+							mark(dialog, content, player) {
+								const stars = lib.suixiang_mou_guanxing_api.getXingCards(player);
+								const topCards = lib.suixiang_mou_guanxing_api.getGuanxingCards(player);
+								if (stars.length) {
+									dialog.addText(`“星”共${stars.length}张`);
+									dialog.addAuto(stars);
+								} else {
+									dialog.addText("当前没有“星”");
+								}
+								if (player.isUnderControl(true)) {
+									if (topCards.length) {
+										dialog.addText("牌堆顶的牌：");
+										dialog.addAuto(topCards);
+									}
+								} else {
+									dialog.addText(`牌堆顶有${topCards.length}张牌`);
+								}
+							},
+						},
+						mod: {
+							maxHandcard() {
+								return 0;
+							},
+							cardUsable(card) {
+								if (lib.suixiang_mou_guanxing_api.isGuanxingCard(card)) return Infinity;
+							},
+							targetInRange(card) {
+								if (lib.suixiang_mou_guanxing_api.isGuanxingCard(card)) return true;
+							},
+						},
+						ai: {
+							guanxing: true,
+						},
+					},
+					suixiang_mou_kongcheng: {
+						audio: "ext:随想录/audio/skill:2",
+						locked: true,
+						mod: {
+							targetEnabled(card, player, target) {
+								if (target.countCards("h") === 0 && (card.name === "sha" || card.name === "juedou")) {
+									return false;
+								}
+							},
+						},
+						trigger: { player: "damageBegin1" },
+						filter(event, player) {
+							return event.num > 0 && player.countCards("h") === 0 && lib.suixiang_mou_guanxing_api.getXingCards(player).length >= 3;
+						},
+						async content(event, trigger, player) {
+							const result = await player
+								.chooseBool({
+									prompt: "空城：是否弃置三张“星”，令此次伤害无效？",
+									choice: true,
+								})
+								.forResult();
+							if (!result?.bool) return;
+							const payment = await player
+								.chooseCard({
+									position: "x",
+									selectCard: 3,
+									forced: true,
+									prompt: "空城：选择三张“星”置入弃牌堆",
+									filterCard(card) {
+									return lib.suixiang_mou_guanxing_api.isXingCard(card);
+									},
+								})
+								.forResult();
+							if (!payment?.bool || payment.cards?.length !== 3) return;
+							await player.loseToDiscardpile({ cards: payment.cards, log: false, animate: false });
+							trigger.cancel();
+						},
+						ai: {
+							noh: true,
+							skillTagFilter(player, tag) {
+								return tag === "noh" && player.countCards("h") === 0;
+							},
+						},
+					},
+					// ========== 看破（谋诸葛亮加强版） ==========
+					suixiang_mou_kanpo: {
+						audio: "ext:随想录/audio/skill:2",
+						mark: true,
+						marktext: "破",
+						init(player) {
+							player.storage.suixiang_mou_kanpo = [];
+						},
+						onremove(player) {
+							delete player.storage.suixiang_mou_kanpo;
+						},
+						intro: {
+							markcount(storage) {
+								return Array.isArray(storage) ? storage.length : 0;
+							},
+							mark(dialog, content, player) {
+								const names = player.getStorage("suixiang_mou_kanpo");
+								dialog.addText(`当前记录${names.length}项牌名`);
+								if (player.isUnderControl(true) && names.length) {
+									dialog.addText("当前记录的牌名：");
+									dialog.addSmall([names.map(name => [get.type(name), "", name]), "vcard"]);
+								}
+							},
+						},
+						group: ["suixiang_mou_kanpo_init", "suixiang_mou_kanpo_use"],
+						subSkill: {
+							init: {
+								charlotte: true,
+								trigger: { global: "gameStart" },
+								forced: true,
+								async content(event, trigger, player) {
+									const list = lib.suixiang_mou_kanpo_api.getCardList();
+									if (!list.length) {
+										player.storage.suixiang_mou_kanpo = [];
+										player.markSkill("suixiang_mou_kanpo");
+										return;
+									}
+									const setupControls = () => {
+										const event = get.event();
+										const updateCounter = (button, count) => {
+											let counterNode = button.querySelector(".caption");
+											if (count > 0) {
+												if (counterNode) counterNode.childNodes[0].innerHTML = `×${count}`;
+												else {
+													counterNode = ui.create.caption(`<span style="font-size:24px; font-family:xinwei; text-shadow:#FFF 0 0 4px, #FFF 0 0 4px, rgba(74,29,1,1) 0 0 3px;">×${count}</span>`, button);
+													counterNode.style.right = "5px";
+													counterNode.style.bottom = "2px";
+												}
+											} else if (counterNode) counterNode.childNodes[0].innerHTML = "";
+										};
+										const controls = [(link) => {
+											const evt = get.event();
+											if (!evt?.dialog?.buttons) return;
+											if (link === "撤销上一项") {
+												const button = ui.selected.buttons.pop();
+												if (button) {
+													const count = ui.selected.buttons.filter(item => item === button).length;
+													if (count) button.classList.add("selected");
+													else button.classList.remove("selected");
+													updateCounter(button, count);
+												}
+											} else if (link === "清除选择") {
+												for (const button of evt.dialog.buttons) {
+													button.classList.remove("selectable");
+													button.classList.remove("selected");
+													updateCounter(button, 0);
+												}
+												ui.selected.buttons.length = 0;
+											}
+											game.check();
+										}];
+										const control = ui.create.control(controls.concat(["撤销上一项", "清除选择"]));
+										// 将辅助按钮放到确认按钮上方，避免与原生确认栏重叠。
+										control.classList.add("suixiang-mou-kanpo-controls");
+										control.style.top = "-56px";
+										control.style.zIndex = "6";
+										event.controls = [control];
+									};
+									const closeControls = () => {
+										const event = get.event();
+										if (event?.controls) event.controls[0].close();
+									};
+									if (event.isMine()) setupControls();
+									else if (event.isOnline()) event.player.send(setupControls);
+
+									const result = await player
+										.chooseButton({
+											createDialog: ["看破：选择0至4项记录（可重复）", [list, "vcard"]],
+											selectButton: [0, 4],
+											forced: false,
+											ai(button) {
+												const name = button.link[2];
+												const score = { wuxie: 6, sha: 5.8, tao: 5.5, shan: 5.2, jiu: 4.7, wuzhong: 4.5 };
+												return score[name] || 2;
+											},
+										})
+										.set("maxCount", 4)
+										.set("custom", {
+											add: {
+												confirm(bool) {
+													const event = get.event();
+													const owner = event?.controls ? event : event?.parent;
+													if (owner?.controls) owner.controls.forEach(control => control.close());
+													if (ui.confirm) ui.confirm.close();
+													game.uncheck();
+												},
+												button() {
+													if (ui.selected.buttons.length) return;
+													const event = get.event();
+													for (const button of event.dialog?.buttons || []) {
+														const counterNode = button.querySelector(".caption");
+														if (counterNode) counterNode.childNodes[0].innerHTML = "";
+													}
+													const parent = event.parent;
+													if (parent.controls) parent.controls[0].classList.add("disabled");
+												},
+											},
+											replace: {
+												button(button) {
+													const event = get.event();
+													if (!event.isMine() || !button.classList.contains("selectable")) return;
+													if (ui.selected.buttons.length >= event.maxCount) return false;
+													button.classList.add("selected");
+													ui.selected.buttons.push(button);
+													const count = ui.selected.buttons.filter(item => item === button).length;
+													let counterNode = button.querySelector(".caption");
+													if (counterNode) counterNode.childNodes[0].innerHTML = `×${count}`;
+													else {
+														counterNode = ui.create.caption(`<span style="font-size:24px; font-family:xinwei; text-shadow:#FFF 0 0 4px, #FFF 0 0 4px, rgba(74,29,1,1) 0 0 3px;">×${count}</span>`, button);
+														counterNode.style.right = "5px";
+														counterNode.style.bottom = "2px";
+													}
+													const parent = event.parent;
+													if (parent.controls) parent.controls[0].classList.remove("disabled");
+													game.check();
+												},
+											},
+									})
+										.forResult();
+									if (result.bool) {
+										player.storage.suixiang_mou_kanpo = (result.links || []).map(link => link[2]);
+									} else {
+										player.storage.suixiang_mou_kanpo = [];
+										if (event.isMine()) closeControls();
+										else if (event.isOnline()) event.player.send(closeControls);
+									}
+									player.markSkill("suixiang_mou_kanpo");
+								},
+							},
+							use: {
+								audio: "suixiang_mou_kanpo",
+								trigger: { global: "useCard" },
+								filter(event, player) {
+									const name = event.card && get.name(event.card, event.player);
+									return event.player !== player && !!name && player.storage.suixiang_mou_kanpo?.includes(name);
+								},
+								prompt2(event) {
+									const name = event.card && (get.name(event.card, event.player) || event.card.name);
+									return `移去一项${get.translation(name)}记录，令${get.translation(event.card)}无效并摸一张牌`;
+								},
+								check(event, player) {
+									const name = event.card && (get.name(event.card, event.player) || event.card.name);
+									if (name === "wuxie" || name === "shan") return get.attitude(player, event.player) < -1;
+									return (event.targets || []).reduce((sum, target) => sum + get.effect(target, event.card, event.player, player), 0) < 0;
+								},
+								logTarget: "player",
+								async content(event, trigger, player) {
+									const name = get.name(trigger.card, trigger.player) || trigger.card.name;
+									const records = player.storage.suixiang_mou_kanpo;
+									if (!lib.suixiang_mou_kanpo_api.consumeRecord(records, name)) return;
+									player.markSkill("suixiang_mou_kanpo");
+									if (Array.isArray(trigger.targets)) trigger.targets.length = 0;
+									trigger.all_excluded = true;
+									if (player.storage.suixiang_mou_huoji_failed && trigger.player?.isIn()) {
+										const user = trigger.player;
+										const skills = user.getSkills("invisible", false, false).filter(skill => lib.skill[skill] && !get.is.locked(skill, user));
+										for (const skill of skills) {
+											// 失效一轮：下一次全局 roundStart 时恢复。
+											user.tempBanSkill(skill, "roundStart");
+										}
+										await user.damage({ num: 1, nosource: true });
+									}
+									await player.draw({ num: 1 });
+									if (!player.isIn()) return;
+
+									const list = lib.suixiang_mou_kanpo_api.getCardList(name);
+									if (!list.length) return;
+									const { bool } = await player
+										.chooseBool({ prompt: `看破：是否记录一个不同于${get.translation(name)}的新牌名？`, choice: true })
+										.forResult();
+									if (!bool) return;
+									const result = await player
+										.chooseButton({
+											createDialog: [`看破：选择一个不同于${get.translation(name)}的牌名`, [list, "vcard"]],
+											selectButton: 1,
+											forced: true,
+											ai(button) {
+												const score = { wuxie: 6, sha: 5.8, tao: 5.5, shan: 5.2, jiu: 4.7, wuzhong: 4.5 };
+												return score[button.link[2]] || 2;
+											},
+										})
+										.forResult();
+									const newName = result.links?.[0]?.[2];
+									if (!result.bool || !newName || newName === name) return;
+									records.push(newName);
+									player.markSkill("suixiang_mou_kanpo");
+								},
+							},
+						},
+					},
 					// ========== 驭雳（基于原版 yuli 改动：新增相邻角色溅射扩散） ==========
 					suixiang_mb_yuli: {
 						audio: "ext:随想录/audio/skill:6",
@@ -2135,6 +2998,27 @@ export default function () {
 					},
 				},
 				translate: {
+					suixiang_mou_huoji: "火计",
+					suixiang_mou_huoji_info:
+						"使命技，出牌阶段限一次，你可以选择一名其他角色，对其与其势力相同的其他角色各造成1点火焰伤害。若其中有角色因此进入濒死，你可以再次发动本技能；每回合第X次额外发动造成的伤害增加X点（X为本回合本技能额外发动的次数），限本次出牌阶段内链式追加。成功：准备阶段，若有角色曾因火焰伤害进入过濒死，你失去〖火计〗，获得〖观星〗和〖空城〗。失败：成功前你进入濒死时，你将体力回复至上限，然后使命失败。",
+					"#ext:随想录/audio/skill/suixiang_mou_huoji1": "区区汉贼，怎挡天火之威？",
+					"#ext:随想录/audio/skill/suixiang_mou_huoji2": "就让此火，再兴炎汉国祚。",
+					"#ext:随想录/audio/skill/suixiang_mou_huoji3": "吾虽有功，然终逆天命啊。",
+					suixiang_mou_guanxing: "观星",
+					suixiang_mou_guanxing_info:
+						"锁定技，你的手牌数始终为0，牌堆顶七张牌对你始终可见。每当你从手牌区弃置牌后，你将这些牌置于武将牌上，称为“星”。你可以如同使用或打出手牌般使用或打出“星”和牌堆顶的七张牌；你以此法使用牌堆顶的牌无距离和次数限制。每名角色的准备阶段，你可以调整牌堆顶七张牌的顺序，并将其中任意张置于牌堆底。",
+					suixiang_mou_kongcheng: "空城",
+					suixiang_mou_kongcheng_info:
+						"锁定技，你没有手牌时，不能成为【杀】或【决斗】的目标。当你即将受到伤害时，你可以弃置三张“星”，令此伤害无效。",
+					suixiang_mou_kanpo: "看破",
+					suixiang_mou_kanpo_info:
+						"游戏开始时，你可以选择0至4个当前牌堆中的牌名并记录（可重复）。其他角色使用与你记录牌名相同的牌时，你可以移去一个对应记录，令此牌无效并摸一张牌，然后你可以记录一个与刚移去牌名不同的牌名（可与已有记录重复）。若〖火计〗使命失败，则令此牌使用者的所有非锁定技失效至下一轮开始，并对其造成1点无来源伤害。",
+					"#ext:随想录/audio/skill/suixiang_mou_kanpo1": "知汝欲行此计，故已待之久矣。",
+					"#ext:随想录/audio/skill/suixiang_mou_kanpo2": "静思敌谋，以出应对之策。",
+					"#ext:随想录/audio/skill/suixiang_mou_guanxing1": "明星皓月，前路通达。",
+					"#ext:随想录/audio/skill/suixiang_mou_guanxing2": "冷夜孤星，正如时局啊。",
+					"#ext:随想录/audio/skill/suixiang_mou_kongcheng1": "城下千军万马，我亦谈笑自若。",
+					"#ext:随想录/audio/skill/suixiang_mou_kongcheng2": "仲达可愿与我城中一叙？",
 					suixiang_wuyi: "武翊",
 					suixiang_wuyi_info:
 						"持恒技。你本局累计使用或打出过的基本牌牌名数达到1种时，你使用牌无距离和次数限制；达到2种时，你视为拥有〖龙魂〗；达到3种时，你的回合内其他角色的非持恒技失效；达到4种时，你的手牌数始终为4。",
@@ -2226,7 +3110,7 @@ export default function () {
 			},
 			intro: "随想录扩展：所有武将/技能均以 suixiang 为前缀。下载地址：https://github.com/keepermttl/noname-suixianglu",
 			author: "伽拉忒亚",
-			version: "1.3.14",
+			version: "1.3.16",
 		},
 		files: {
 			character: [],
