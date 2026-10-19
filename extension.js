@@ -155,6 +155,140 @@ function getMouHuojiDamageEvent(event) {
 	if (event?.parent?.name === "damage") return event.parent;
 	return event?.getParent?.("damage", true) || null;
 }
+
+function getShenLvbuTrickSource(card) {
+	if (!card) return null;
+	const type = lib.card[card.name]?.type;
+	if (type === "trick" || type === "delay") return card;
+	if (card.name === "sha" && card.cards?.length === 1) {
+		const [source] = card.cards;
+		const sourceType = lib.card[source?.name]?.type;
+		if (sourceType === "trick" || sourceType === "delay") return source;
+	}
+	return null;
+}
+
+function getShenLvbuTrickTargetRange(card, player) {
+	const source = getShenLvbuTrickSource(card);
+	if (!source) return null;
+	const info = lib.card[source.name] || {};
+	let select = info.selectTarget;
+	let range;
+	if (typeof select === "function") {
+		range = [1, 1];
+		const selected = select(source, player, range);
+		if (selected !== undefined) select = selected;
+		else select = range;
+	}
+	if (typeof select === "number") range = [select, select];
+	else if (Array.isArray(select)) range = [...select];
+	else if (info.notarget) range = [0, 0];
+	else range = [1, 1];
+	const key = "_suixiang_wumou_selectTarget";
+	const previous = _status[key];
+	_status[key] = true;
+	try {
+		game.checkMod?.(source, player, range, "selectTarget", player);
+	} finally {
+		if (previous === undefined) delete _status[key];
+		else _status[key] = previous;
+	}
+	return range;
+}
+
+async function payShenLvbuBaonuCost(player, amount) {
+	if (player.countMark("baonu") < amount) return false;
+	const altControl = "令一名其他角色失去体力上限";
+	const canReplace =
+		player.countMark("baonu") >= 8 &&
+		!player.hasSkill("suixiang_wumou_cost_used") &&
+		game.hasPlayer(target => target !== player && target.isIn() && target.maxHp > 0);
+	if (canReplace) {
+		const choice = await player
+			.chooseControl({
+				controls: [`消耗${amount}枚暴怒标记`, altControl],
+				prompt: `无谋：选择如何支付${amount}枚暴怒标记`,
+				choice: 0,
+			})
+			.set("ai", () =>
+				game.hasPlayer(target => target !== player && target.isIn() && target.maxHp > 0 && get.attitude(player, target) < 0)
+					? altControl
+					: `消耗${amount}枚暴怒标记`,
+			)
+			.forResult();
+		if (choice?.control === altControl) {
+			const result = await player
+				.chooseTarget({
+					prompt: "无谋：选择一名其他角色，令其尽可能失去体力上限以代替暴怒消耗",
+					selectTarget: 1,
+					forced: true,
+					filterTarget(card, current, target) {
+						return target !== current && target.isIn() && target.maxHp > 0;
+					},
+					ai(target) {
+						return -get.attitude(player, target) + Math.min(amount, target.maxHp) / 10;
+					},
+				})
+				.forResult();
+			const target = result?.targets?.[0];
+			if (target && target !== player && target.isIn() && target.maxHp > 0) {
+				const maxHpBefore = target.maxHp;
+				const maxHpCost = Math.min(amount, maxHpBefore);
+				player.addTempSkill("suixiang_wumou_cost_used", "phaseAfter");
+				player.logSkill("suixiang_wumou", target);
+				const loss = target.loseMaxHp({ num: maxHpCost });
+				await loss;
+				const changedMaxHp = Number(loss?.changedMaxHp);
+				const actualLoss = changedMaxHp < 0 ? -changedMaxHp : maxHpBefore - target.maxHp;
+				const substituted = Math.min(maxHpCost, Math.max(0, actualLoss));
+				const remaining = amount - substituted;
+				if (remaining > 0) player.removeMark("baonu", remaining);
+				return true;
+			}
+		}
+	}
+	player.removeMark("baonu", amount);
+	return true;
+}
+
+async function resolveShenLvbuShenfen(player) {
+	const targets = game.filterPlayer(current => current !== player);
+	if (!targets.length) return 0;
+	player.line(targets, "green");
+	for (const target of targets) {
+		if (!target.isIn()) continue;
+		const cards = target.getCards("he");
+		if (cards.length) await target.discard({ cards, discarder: player });
+	}
+	let actualDamage = 0;
+	for (const target of targets) {
+		if (!target.isIn()) continue;
+		const hpHistory = game.getGlobalHistory("changeHp");
+		const historyLength = hpHistory.length;
+		const damage = target.damage({ source: player, num: 1 });
+		await damage;
+		let matchedChange = false;
+		for (const change of hpHistory.slice(historyLength)) {
+			const parent = change.getParent?.() || change.parent;
+			if (change.player !== target || parent !== damage) continue;
+			matchedChange = true;
+			// changeHp.num 已在本体的 changeHp 内容中扣除护甲抵挡量，代表实际体力变化。
+			const hpChange = Number(change.num);
+			if (hpChange < 0) actualDamage -= hpChange;
+		}
+		// 兼容没有暴露 changeHp 历史的桩或旧版本事件；取消/视为伤害不计入回复。
+		if (!matchedChange && damage && !damage._cancelled && !damage.cancelled && !damage.unreal) {
+			const damageNum = Number(damage.num);
+			const hujia = Number(damage.hujia) || 0;
+			if (damageNum > 0) actualDamage += Math.max(0, damageNum - hujia);
+		}
+	}
+	if (actualDamage > 0 && player.isIn()) {
+		await player.recover({ num: actualDamage });
+	}
+	return actualDamage;
+}
+
 const MOU_GUANXING_TAG = "suixiang_mou_guanxing";
 const MOU_XING_TAG = "suixiang_mou_xing";
 function isMouGuanxingCard(card) {
@@ -1168,9 +1302,32 @@ function setupShenCaopiCompat() {
 	}
 }
 
+// 神吕布：复用原版十周年动态皮肤全集，并在千幻聆音中共享原版静态皮肤库。
+// 角色自带“冠绝天下”静态立绘，以上兼容扩展缺失时仍能正常显示原画。
+function setupShenLvbuCompat() {
+	if (window.decadeUI?.dynamicSkin) {
+		const source = window.decadeUI.dynamicSkin.shen_lvbu;
+		if (source && !window.decadeUI.dynamicSkin["suixiang-shen_lvbu"]) {
+			window.decadeUI.dynamicSkin["suixiang-shen_lvbu"] = source;
+		}
+	}
+	if (lib.qhly_skinShare) {
+		const share = lib.qhly_skinShare["suixiang-shen_lvbu"] || {};
+		share.name ||= "shen_lvbu";
+		share.skills ||= {};
+		lib.qhly_skinShare["suixiang-shen_lvbu"] = share;
+	}
+}
+
 export const type = "extension";
 
 export default function () {
+	lib.suixiang_shen_lvbu_api = {
+		getTrickSource: getShenLvbuTrickSource,
+		getTrickTargetRange: getShenLvbuTrickTargetRange,
+		payBaonuCost: payShenLvbuBaonuCost,
+		resolveShenfen: resolveShenLvbuShenfen,
+	};
 	return {
 		name: "随想录",
 		content(config, pack) {
@@ -1216,11 +1373,13 @@ export default function () {
 			setupZhaoyunCompat();
 			setupMouZhugeliangCompat();
 			setupShenCaopiCompat();
+			setupShenLvbuCompat();
 			lib.arenaReady.push(setupShenMachaoCompat);
 			lib.arenaReady.push(setupSunquanCompat);
 			lib.arenaReady.push(setupZhaoyunCompat);
 			lib.arenaReady.push(setupMouZhugeliangCompat);
 			lib.arenaReady.push(setupShenCaopiCompat);
+			lib.arenaReady.push(setupShenLvbuCompat);
 			lib.arenaReady.push(setupMouZhugeliangCardCompat);
 			lib.arenaReady.push(setupMouGuanxingPlayerTopCardsCompat);
 		},
@@ -1294,6 +1453,19 @@ export default function () {
 						names: "曹|丕",
 						img: "extension/随想录/image/character/suixiang-dc_shen_caopi.jpg",
 					},
+					// 神吕布：默认使用冠绝天下静态立绘；无动皮扩展时仍由 img 正常显示。
+					// 静态皮肤独立内置，十周年 UI/千幻聆音则额外共享原版全部皮肤。
+					"suixiang-shen_lvbu": {
+						sex: "male",
+						group: "shen",
+						hp: 5,
+						maxHp: 5,
+						groupInGuozhan: "qun",
+						skills: ["suixiang_wuqian", "suixiang_kuangbao", "suixiang_wumou", "suixiang_shenfen"],
+						names: "吕|布",
+						img: "extension/随想录/image/character/suixiang-shen_lvbu.jpg",
+						skinPath: "ext:随想录/image/skin/suixiang-shen_lvbu/",
+					},
 				},
 				translate: {
 					"suixiang-shi_xiaoqiao": "势 小乔",
@@ -1302,16 +1474,394 @@ export default function () {
 					"suixiang-dm_sunquan": "魔 孙权",
 					"suixiang-mou_zhugeliang": "谋 诸葛亮",
 					"suixiang-dc_shen_caopi": "神 曹丕",
+					"suixiang-shen_lvbu": "神 吕布",
 				},
 				characterTitle: {
 					"suixiang-shi_xiaoqiao": "衷音慰湟",
 					"suixiang-mb_shen_machao": "势震九天",
 					"suixiang-dm_sunquan": "隳堕的英谋",
 					"suixiang-dc_shen_caopi": "月晦书轮回",
+					"suixiang-shen_lvbu": "修罗之道",
 				},
 			},
 			skill: {
 				skill: {
+					// ========== 狂暴（经典神吕布） ==========
+					suixiang_kuangbao: {
+						audio: "ext:随想录/audio/skill:2",
+						logAudio(event) {
+							if (typeof event === "number") return `ext:随想录/audio/skill/suixiang_kuangbao${event}.mp3`;
+							return [
+								"ext:随想录/audio/skill/suixiang_kuangbao1.mp3",
+								"ext:随想录/audio/skill/suixiang_kuangbao2.mp3",
+							];
+						},
+						trigger: {
+							source: "damageSource",
+							player: ["damageEnd", "enterGame"],
+							global: "phaseBefore",
+						},
+						forced: true,
+						filter(event) {
+							return event.name === "damage"
+								? event.num > 0
+								: event.name !== "phase" || game.phaseNumber === 0;
+						},
+						content(event, trigger, player) {
+							const num = trigger.name === "damage" ? trigger.num : 2;
+							if (num > 0) player.addMark("baonu", num);
+						},
+					},
+					// ========== 无谋（经典神吕布） ==========
+					suixiang_wumou: {
+						audio: "ext:随想录/audio/skill:2",
+						logAudio(event) {
+							if (typeof event === "number") return `ext:随想录/audio/skill/suixiang_wumou${event}.mp3`;
+							return [
+								"ext:随想录/audio/skill/suixiang_wumou1.mp3",
+								"ext:随想录/audio/skill/suixiang_wumou2.mp3",
+							];
+						},
+						trigger: { player: "useCard1" },
+						forced: true,
+						locked: true,
+						filter(event, player) {
+							return player.countMark("baonu") >= 4 && !!lib.suixiang_shen_lvbu_api.getTrickSource(event.card);
+						},
+						content() {},
+						group: ["suixiang_wumou_mark_gain"],
+						mod: {
+							cardname(card, player) {
+								const current = get.event();
+								if (
+									player.countMark("baonu") >= 4 &&
+									["chooseToUse", "chooseToRespond"].includes(current?.name) &&
+									!_status._suixiang_wumou_selectTarget &&
+									lib.suixiang_shen_lvbu_api.getTrickSource(card)
+								) {
+									return "sha";
+								}
+							},
+							selectTarget(card, player, range) {
+								const current = get.event();
+								if (
+									player.countMark("baonu") < 4 ||
+									!["chooseToUse", "chooseToRespond"].includes(current?.name) ||
+									_status._suixiang_wumou_selectTarget
+								)
+									return;
+								const targetRange = lib.suixiang_shen_lvbu_api.getTrickTargetRange(card, player);
+								if (targetRange) [range[0], range[1]] = targetRange;
+							},
+							cardEnabled(card, player, event) {
+								event = event || get.event();
+								if (
+									player.countMark("baonu") < 4 ||
+									!["chooseToUse", "chooseToRespond"].includes(event?.name) ||
+									_status._suixiang_wumou_selectTarget
+								)
+									return;
+								const source = lib.suixiang_shen_lvbu_api.getTrickSource(card);
+								if (!source) return;
+								const range = lib.suixiang_shen_lvbu_api.getTrickTargetRange(source, player);
+								if (range?.[0] === 0 && range?.[1] === 0) return true;
+								if (event.name === "chooseToRespond") return true;
+								const cards = Array.isArray(card.cards) && card.cards.length === 1 ? card.cards : [source];
+								const sha = get.autoViewAs({ name: "sha", cards }, cards);
+								return game.hasPlayer(target => target !== player && lib.filter.targetEnabledx(sha, player, target));
+							},
+							targetInRange(card, player) {
+								const current = get.event();
+								if (
+									player.countMark("baonu") < 4 ||
+									!["chooseToUse", "chooseToRespond"].includes(current?.name) ||
+									_status._suixiang_wumou_selectTarget
+								)
+									return;
+								const range = lib.suixiang_shen_lvbu_api.getTrickTargetRange(card, player);
+								if (range?.[0] === -1 || range?.[1] === -1) return true;
+							},
+						},
+						subSkill: {
+							mark_gain: {
+								charlotte: true,
+								forced: true,
+								popup: false,
+								trigger: { player: "addMark" },
+								filter(event) {
+									return event.markName === "baonu" && event.num > 0;
+								},
+								async content(event, trigger, player) {
+									const previous = Number(player.storage.suixiang_wumou_gained) || 0;
+									const total = previous + trigger.num;
+									player.setStorage("suixiang_wumou_gained", total, true);
+									const draws = Math.floor(total / 2) - Math.floor(previous / 2);
+									if (draws > 0) await player.draw({ num: draws });
+								},
+							},
+							cost_used: {
+								charlotte: true,
+								sub: true,
+							},
+						},
+						ai: { halfneg: true },
+					},
+					// ========== 神愤（经典神吕布） ==========
+					suixiang_shenfen: {
+						audio: "ext:随想录/audio/skill:2",
+						logAudio(event) {
+							if (typeof event === "number") return `ext:随想录/audio/skill/suixiang_shenfen${event}.mp3`;
+							return [
+								"ext:随想录/audio/skill/suixiang_shenfen1.mp3",
+								"ext:随想录/audio/skill/suixiang_shenfen2.mp3",
+							];
+						},
+						enable: "phaseUse",
+						usable: 1,
+						filter(event, player) {
+							return player.countMark("baonu") >= 6;
+						},
+						async content(event, trigger, player) {
+							if (!(await lib.suixiang_shen_lvbu_api.payBaonuCost(player, 6))) return;
+							await lib.suixiang_shen_lvbu_api.resolveShenfen(player);
+						},
+						group: ["suixiang_shenfen_dying"],
+						ai: {
+							order: 10,
+							result: {
+								player(player) {
+									const damage = game
+										.filterPlayer(target => target !== player)
+										.reduce((sum, target) => sum + get.damageEffect(target, player, player), 0);
+									return damage + (player.isDamaged() ? 1 : 0);
+								},
+							},
+						},
+						subSkill: {
+							dying: {
+								audio: "suixiang_shenfen",
+								trigger: { player: "dying" },
+								direct: true,
+								filter(event, player) {
+									return (
+										player.countMark("baonu") >= 6 &&
+										!player.hasSkill("suixiang_shenfen_dying_used")
+									);
+								},
+								async cost(event, trigger, player) {
+									player.addTempSkill("suixiang_shenfen_dying_used", { global: "phaseAfter" });
+									const result = await player
+										.chooseBool("是否发动【神愤】？")
+										.set("ai", () => player.hp <= 0)
+										.forResult();
+									event.result = { bool: !!result?.bool };
+								},
+								async content(event, trigger, player) {
+									if (!(await lib.suixiang_shen_lvbu_api.payBaonuCost(player, 6))) return;
+									await lib.suixiang_shen_lvbu_api.resolveShenfen(player);
+								},
+							},
+							dying_used: {
+								charlotte: true,
+								sub: true,
+							},
+						},
+					},
+					// ========== 无前（经典神吕布） ==========
+					suixiang_wuqian: {
+						audio: "ext:随想录/audio/skill:2",
+						logAudio(event) {
+							if (typeof event === "number") {
+								return `ext:随想录/audio/skill/suixiang_wuqian${event}.mp3`;
+							}
+							return [
+								"ext:随想录/audio/skill/suixiang_wuqian1.mp3",
+								"ext:随想录/audio/skill/suixiang_wuqian2.mp3",
+							];
+						},
+						enable: "phaseUse",
+						filter(event, player) {
+							return player.countMark("baonu") >= 2 && !player.hasSkill("suixiang_wuqian_buff");
+						},
+						async content(event, trigger, player) {
+							if (!(await lib.suixiang_shen_lvbu_api.payBaonuCost(player, 2))) return;
+							player.addTempSkill("suixiang_wuqian_buff", "phaseUseAfter");
+						},
+						group: [
+							"suixiang_wuqian_damage_card",
+							"suixiang_wuqian_damage_event",
+							"suixiang_wuqian_wushuang_sha",
+							"suixiang_wuqian_wushuang_duel",
+							"suixiang_wuqian_track_shan_response",
+							"suixiang_wuqian_buff_sha_hit",
+						],
+						ai: {
+							order: 9,
+							result: { player: 1 },
+							check(event, player) {
+								return player.countCards("hs", "sha") > 0;
+							},
+						},
+					},
+					suixiang_wuqian_damage_card: {
+						sourceSkill: "suixiang_wuqian",
+						charlotte: true,
+						firstDo: true,
+						priority: 100,
+						trigger: { player: "useCard0" },
+						forced: true,
+						popup: false,
+						filter(event) {
+							return get.tag(event.card, "damage") && event.baseDamage < 2;
+						},
+						content(event, trigger) {
+							trigger.baseDamage = 2;
+						},
+					},
+					suixiang_wuqian_damage_event: {
+						sourceSkill: "suixiang_wuqian",
+						charlotte: true,
+						firstDo: true,
+						priority: 100,
+						trigger: { source: "damageBegin1" },
+						forced: true,
+						popup: false,
+						filter(event, player) {
+							return event.source === player && event.num > 0 && event.num < 2;
+						},
+						content(event, trigger) {
+							trigger.num = 2;
+						},
+					},
+					suixiang_wuqian_wushuang_sha: {
+						sourceSkill: "suixiang_wuqian",
+						charlotte: true,
+						audio: "ext:随想录/audio/skill:2",
+						logAudio(event) {
+							if (typeof event === "number") {
+								return `ext:随想录/audio/skill/suixiang_wuqian_wushuang${event}.mp3`;
+							}
+							return [
+								"ext:随想录/audio/skill/suixiang_wuqian_wushuang1.mp3",
+								"ext:随想录/audio/skill/suixiang_wuqian_wushuang2.mp3",
+							];
+						},
+						trigger: { player: "useCardToPlayered" },
+						forced: true,
+						filter(event) {
+							return event.card.name === "sha" && !event.getParent().directHit.includes(event.target);
+						},
+						logTarget: "target",
+						content(event, trigger) {
+							const id = trigger.target.playerid;
+							const map = trigger.getParent().customArgs;
+							if (!map[id]) map[id] = {};
+							if (typeof map[id].shanRequired === "number") {
+								map[id].shanRequired++;
+							} else {
+								map[id].shanRequired = 2;
+							}
+						},
+						ai: {
+							directHit_ai: true,
+							skillTagFilter(player, tag, arg) {
+								if (arg.card?.name !== "sha" || arg.target.countCards("hs", "shan") > 1) return false;
+							},
+						},
+					},
+					suixiang_wuqian_wushuang_duel: {
+						sourceSkill: "suixiang_wuqian",
+						charlotte: true,
+						audio: "ext:随想录/audio/skill:2",
+						logAudio(event) {
+							if (typeof event === "number") {
+								return `ext:随想录/audio/skill/suixiang_wuqian_wushuang${event}.mp3`;
+							}
+							return [
+								"ext:随想录/audio/skill/suixiang_wuqian_wushuang1.mp3",
+								"ext:随想录/audio/skill/suixiang_wuqian_wushuang2.mp3",
+							];
+						},
+						trigger: { player: "useCardToPlayered", target: "useCardToTargeted" },
+						forced: true,
+						filter(event) {
+							return event.card.name === "juedou";
+						},
+						logTarget(trigger, player) {
+							return player === trigger.player ? trigger.target : trigger.player;
+						},
+						content(event, trigger, player) {
+							const id = (player === trigger.player ? trigger.target : trigger.player).playerid;
+							const idt = trigger.target.playerid;
+							const map = trigger.getParent().customArgs;
+							if (!map[idt]) map[idt] = {};
+							if (!map[idt].shaReq) map[idt].shaReq = {};
+							if (!map[idt].shaReq[id]) map[idt].shaReq[id] = 1;
+							map[idt].shaReq[id]++;
+						},
+						ai: {
+							directHit_ai: true,
+							skillTagFilter(player, tag, arg) {
+								if (arg.card?.name !== "juedou" || Math.floor(arg.target.countCards("hs", "sha") / 2) > player.countCards("hs", "sha")) return false;
+							},
+						},
+					},
+					suixiang_wuqian_track_shan_response: {
+						sourceSkill: "suixiang_wuqian",
+						charlotte: true,
+						trigger: { global: "respond" },
+						forced: true,
+						popup: false,
+						filter(event, player) {
+							return (
+								player.hasSkill("suixiang_wuqian_buff") &&
+								event.card?.name === "shan" &&
+								event.respondTo?.[0] === player &&
+								event.respondTo?.[1]?.name === "sha"
+							);
+						},
+						content(event, trigger) {
+							const useEvent = trigger.getParent("useCard");
+							const target = trigger.player;
+							if (!useEvent || useEvent.card !== trigger.respondTo[1] || !target) return;
+							const args = useEvent.customArgs[target.playerid] ?? (useEvent.customArgs[target.playerid] = {});
+							args.suixiang_wuqian_shanResponded = true;
+						},
+					},
+					suixiang_wuqian_buff_sha_hit: {
+						sourceSkill: "suixiang_wuqian",
+						charlotte: true,
+						trigger: { player: "shaHit" },
+						forced: true,
+						popup: false,
+						filter(event, player) {
+							if (event.card?.name !== "sha" || !player.hasSkill("suixiang_wuqian_buff")) return false;
+							const response = event.responded;
+							const useEvent = event.getParent("useCard");
+							const customArgs = useEvent?.customArgs?.[event.target?.playerid];
+							return (!response?.bool || response.result !== "shaned") && !customArgs?.suixiang_wuqian_shanResponded;
+						},
+						content(event, trigger) {
+							trigger.baseDamage = Math.max(trigger.baseDamage || 1, 2) + 1;
+						},
+					},
+					suixiang_wuqian_buff: {
+						sourceSkill: "suixiang_wuqian",
+						mod: {
+							cardUsable(card) {
+								if (card.name === "sha") return Infinity;
+							},
+							targetInRange(card) {
+								if (card.name === "sha") return true;
+							},
+						},
+						ai: {
+							unequip: true,
+							skillTagFilter(player, tag, arg) {
+								return (arg?.card?.name || arg?.name) === "sha";
+							},
+						},
+					},
 					// ========== 火计（使命技） ==========
 					suixiang_mou_huoji: {
 						audio: "ext:随想录/audio/skill:3",
@@ -3527,6 +4077,40 @@ export default function () {
 					"#ext:随想录/audio/skill/suixiang_mou_guanxing2": "冷夜孤星，正如时局啊。",
 					"#ext:随想录/audio/skill/suixiang_mou_kongcheng1": "城下千军万马，我亦谈笑自若。",
 					"#ext:随想录/audio/skill/suixiang_mou_kongcheng2": "仲达可愿与我城中一叙？",
+					suixiang_wuqian: "无前",
+					suixiang_wuqian_info:
+						"你造成的伤害基础值为2。你使用【杀】指定目标后，其需依次使用两张【闪】才能抵消此【杀】；你使用【决斗】指定目标后，或成为其他角色使用【决斗】的目标后，对方每次响应此【决斗】需依次打出两张【杀】。出牌阶段，你可以消耗2枚“暴怒”标记获得以下效果直到出牌阶段结束：你使用【杀】无次数和距离限制且无视防具；若此【杀】没有任何【闪】响应，目标额外受到1点伤害（与此【杀】的伤害合并结算）。",
+					suixiang_kuangbao: "狂暴",
+					suixiang_kuangbao_info: "锁定技，游戏开始时，你获得2枚“暴怒”标记；每当你造成或受到X点伤害后，你获得X枚“暴怒”标记。",
+					suixiang_wumou: "无谋",
+					suixiang_wumou_info:
+						"锁定技，你每累计获得2枚“暴怒”标记，摸一张牌（游戏开始时获得的2枚也计入）。当前“暴怒”标记数不少于4时，你的锦囊牌（包括延时锦囊）均视为【杀】，目标数量按原牌确定；原牌为全体目标的锦囊时，此【杀】对所有其他角色生效。当前“暴怒”标记数不少于8时，每回合限一次，当你发动需消耗“暴怒”标记的技能时，你可以选择一名其他角色，令其尽可能失去等量体力上限以代替消耗；不足部分仍消耗“暴怒”标记。",
+					suixiang_wumou_mark_gain: "无谋",
+					suixiang_wumou_cost_used: "无谋·替代消耗",
+					suixiang_wumou_cost_used_info: "本回合已以体力上限替代暴怒标记消耗。",
+					suixiang_shenfen: "神愤",
+					suixiang_shenfen_info:
+						"出牌阶段限一次，或每回合你首次进入濒死时，你可以消耗6枚“暴怒”标记，令所有其他角色依次弃置其装备区与手牌区所有牌，然后你依次对这些角色造成1点伤害。此效果结算完毕后，你回复等同于此技能造成的实际体力伤害总量的体力。",
+					suixiang_shenfen_dying: "神愤",
+					suixiang_shenfen_dying_used: "神愤·本回合已触发濒死时机",
+					"#ext:随想录/audio/skill/suixiang_shenfen1": "凡人们，颤抖吧！这是神之怒火！",
+					"#ext:随想录/audio/skill/suixiang_shenfen2": "这，才是活生生的地狱！",
+					suixiang_wuqian_damage_card: "无前",
+					suixiang_wuqian_damage_event: "无前",
+					suixiang_wuqian_wushuang_sha: "无双",
+					suixiang_wuqian_wushuang_duel: "无双",
+					suixiang_wuqian_track_shan_response: "无前·暴怒",
+					suixiang_wuqian_buff_sha_hit: "无前·暴怒",
+					suixiang_wuqian_buff: "无前·暴怒",
+					suixiang_wuqian_buff_info: "你使用【杀】无次数和距离限制且无视防具。若此【杀】没有任何【闪】响应，目标额外受到1点伤害。",
+					"#ext:随想录/audio/skill/suixiang_wuqian1": "看我神威，无坚不摧！",
+					"#ext:随想录/audio/skill/suixiang_wuqian2": "天王老子也保不住你！",
+					"#ext:随想录/audio/skill/suixiang_kuangbao1": "嗯~~~~~！",
+					"#ext:随想录/audio/skill/suixiang_kuangbao2": "哼！",
+					"#ext:随想录/audio/skill/suixiang_wumou1": "哪个说我有勇无谋？！",
+					"#ext:随想录/audio/skill/suixiang_wumou2": "不管这些了！",
+					"#ext:随想录/audio/skill/suixiang_wuqian_wushuang1": "燎原千里，凶名远扬！",
+					"#ext:随想录/audio/skill/suixiang_wuqian_wushuang2": "铁蹄奋进，所向披靡！",
 					suixiang_wuyi: "武翊",
 					suixiang_wuyi_info:
 						"持恒技。你本局累计使用或打出过的基本牌牌名数达到1种时，你使用牌无距离和次数限制；达到2种时，你视为拥有〖龙魂〗；达到3种时，你的回合内其他角色的非持恒技失效；达到4种时，你的手牌数始终为4。",
@@ -3618,7 +4202,7 @@ export default function () {
 			},
 			intro: "随想录扩展：所有武将/技能均以 suixiang 为前缀。下载地址：https://github.com/keepermttl/noname-suixianglu",
 			author: "伽拉忒亚",
-			version: "1.3.16",
+			version: "1.3.18",
 		},
 		files: {
 			character: [],
