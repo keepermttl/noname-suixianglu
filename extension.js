@@ -172,7 +172,9 @@ function getShenLvbuTrickTargetRange(card, player) {
 	const source = getShenLvbuTrickSource(card);
 	if (!source) return null;
 	const info = lib.card[source.name] || {};
-	let select = info.selectTarget;
+	// 无中生有使用 -1 表示“可选所有角色”，再由 filterTarget 限定为自己。
+	// 转为【杀】后该过滤不再适用，因此按原牌实际目标数只允许选一名角色。
+	let select = source.name === "wuzhong" ? 1 : info.selectTarget;
 	let range;
 	if (typeof select === "function") {
 		range = [1, 1];
@@ -4084,7 +4086,7 @@ export default function () {
 					suixiang_kuangbao_info: "锁定技，游戏开始时，你获得2枚“暴怒”标记；每当你造成或受到X点伤害后，你获得X枚“暴怒”标记。",
 					suixiang_wumou: "无谋",
 					suixiang_wumou_info:
-						"锁定技，你每累计获得2枚“暴怒”标记，摸一张牌（游戏开始时获得的2枚也计入）。当前“暴怒”标记数不少于4时，你的锦囊牌（包括延时锦囊）均视为【杀】，目标数量按原牌确定；原牌为全体目标的锦囊时，此【杀】对所有其他角色生效。当前“暴怒”标记数不少于8时，每回合限一次，当你发动需消耗“暴怒”标记的技能时，你可以选择一名其他角色，令其尽可能失去等量体力上限以代替消耗；不足部分仍消耗“暴怒”标记。",
+						"锁定技，你每累计获得2枚“暴怒”标记，摸一张牌（游戏开始时获得的2枚也计入）。当前“暴怒”标记数不少于4时，你的锦囊牌（包括延时锦囊）均视为【杀】，目标数量按原牌确定；【无中生有】转化的【杀】仅指定一名其他角色，原牌为全体目标的锦囊时，此【杀】对所有其他角色生效。当前“暴怒”标记数不少于8时，每回合限一次，当你发动需消耗“暴怒”标记的技能时，你可以选择一名其他角色，令其尽可能失去等量体力上限以代替消耗；不足部分仍消耗“暴怒”标记。",
 					suixiang_wumou_mark_gain: "无谋",
 					suixiang_wumou_cost_used: "无谋·替代消耗",
 					suixiang_wumou_cost_used_info: "本回合已以体力上限替代暴怒标记消耗。",
